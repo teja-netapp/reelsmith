@@ -162,7 +162,9 @@ def mp4_metadata(plan: dict, tl: dict, version: int) -> dict:
 def _fmt_editor(ed: dict) -> list[str]:
     L = [f"- **Editor:** {ed.get('label', '?')}"]
     if ed.get("model"):
-        L.append(f"- **Model:** `{ed['model']}`" + (f" (version `{ed['model_version']}`)" if ed.get("model_version") else ""))
+        L.append(f"- **Model:** `{ed['model']}`" + (f" (version `{ed['model_version']}`)" if ed.get("model_version") else "")
+                 + (f", {ed['model_source']}" if ed.get("model_source") else "")
+                 + (f", output: {ed['output_format']}" if ed.get("output_format") else ""))
     if ed.get("shot_log_model"):
         L.append(f"- **Shot logging model:** `{ed['shot_log_model']}`: {ed.get('shots_shown', '?')} shots "
                  f"({ed.get('shots_logged', 0)} newly logged, {ed.get('shots_cached', 0)} from cache"

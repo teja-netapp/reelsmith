@@ -13,10 +13,33 @@ from ..playbook import PLAN_SCHEMA, SYSTEM_PROMPT_FULL, build_context_text, refi
 from .base import Provider, ProviderError, http_json, parse_json_loose, rejected
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
-# auto-detect order when GEMINI_MODEL is not set (first one your key can use wins)
-PREFERRED = ["gemini-4-hydrogen", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]
+# auto-detect order when GEMINI_MODEL is not set (first one your key can use wins).
+# Set any model yourself in Settings (e.g. a free-tier Flash / Flash-Lite / Gemma model).
+PREFERRED = ["gemini-4-hydrogen", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash", "gemini-3.1-flash-lite"]
 
 _resolved_model: str | None = None
+_model_info: dict[str, dict] = {}
+
+
+def normalize_model(name: str | None) -> str:
+    n = (name or "").strip()
+    return n[len("models/"):] if n.startswith("models/") else n
+
+
+def model_info(model: str, headers: dict) -> dict:
+    """Model metadata (token limits, supported methods). Raises ProviderError(status=404) if unknown."""
+    if model in _model_info:
+        return _model_info[model]
+    try:
+        info = http_json(f"{BASE}/models/{model}", headers=headers, timeout=15, retries=0)
+    except ProviderError as e:
+        if getattr(e, "status", None) == 404:
+            err = ProviderError(f"Gemini model '{model}' was not found for this API key. Check the name in Settings.")
+            err.status = 404
+            raise err
+        return {}  # couldn't fetch details; carry on with safe defaults
+    _model_info[model] = info
+    return info
 
 
 def _openapi_schema(schema: dict) -> dict:
@@ -57,7 +80,7 @@ class GeminiProvider(Provider):
     def model(self, log=print) -> str:
         global _resolved_model
         if C.GEMINI_MODEL:
-            return C.GEMINI_MODEL
+            return normalize_model(C.GEMINI_MODEL)
         if _resolved_model:
             return _resolved_model
         try:
@@ -76,36 +99,38 @@ class GeminiProvider(Provider):
 
     def _generate(self, text: str, analysis: dict, log) -> dict:
         model = self.model(log)
-        parts = [{"inlineData": {"mimeType": "image/jpeg", "data": d}} for d in sheet_images_b64(analysis)]
-        parts.append({"text": text})
-        body = {
-            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT_FULL}]},
-            "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": PLAN_SCHEMA,
-                                 "maxOutputTokens": 24000},
-        }
-        url = f"{BASE}/models/{model}:generateContent"
+        info = model_info(model, self._headers())          # unknown model -> clear error, next editor
+        max_out = min(24000, int(info.get("outputTokenLimit") or 8192))
+        images = [{"inlineData": {"mimeType": "image/jpeg", "data": d}} for d in sheet_images_b64(analysis)]
+        schema_txt = "\n\nReturn JSON matching this schema:\n" + json.dumps(PLAN_SCHEMA)
+        system = {"systemInstruction": {"parts": [{"text": SYSTEM_PROMPT_FULL}]}}
+        user = lambda t: {"contents": [{"role": "user", "parts": images + [{"text": t}]}]}  # noqa: E731
+        # Models differ in what they accept (e.g. Gemma: no system instruction, no JSON mode), so step
+        # down from strict JSON-schema output to plain text until one is accepted.
         attempts = [
-            body,
-            # older API versions: OpenAPI-style responseSchema
-            {**body, "generationConfig": {"responseMimeType": "application/json",
-                                          "responseSchema": _openapi_schema(PLAN_SCHEMA), "maxOutputTokens": 24000}},
-            # last resort: schema in the prompt, JSON mime only
-            {**body, "contents": [{"role": "user", "parts": parts[:-1] + [{"text": text + "\n\nReturn JSON matching "
-                                                                                   "this schema:\n" + json.dumps(PLAN_SCHEMA)}]}],
-             "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 24000}},
+            ("JSON schema", {**system, **user(text), "generationConfig": {
+                "responseMimeType": "application/json", "responseJsonSchema": PLAN_SCHEMA, "maxOutputTokens": max_out}}),
+            ("OpenAPI schema", {**system, **user(text), "generationConfig": {
+                "responseMimeType": "application/json", "responseSchema": _openapi_schema(PLAN_SCHEMA),
+                "maxOutputTokens": max_out}}),
+            ("schema in prompt", {**system, **user(text + schema_txt), "generationConfig": {
+                "responseMimeType": "application/json", "maxOutputTokens": max_out}}),
+            ("plain text", {**user(SYSTEM_PROMPT_FULL + "\n\n" + text + schema_txt +
+                                   "\n\nReply with only the JSON object, no other text."),
+                            "generationConfig": {"maxOutputTokens": max_out}}),
         ]
+        url = f"{BASE}/models/{model}:generateContent"
         last = None
         used_format = None
-        for i, b in enumerate(attempts):
+        for i, (fmt, b) in enumerate(attempts):
             try:
                 res = http_json(url, b, headers=self._headers(), timeout=300)
-                used_format = ["JSON schema", "OpenAPI schema", "schema in prompt"][i]
+                used_format = fmt
                 break
             except ProviderError as e:
                 last = e
                 if getattr(e, "status", None) == 400 and i < len(attempts) - 1:
-                    log(f"Gemini rejected request format #{i + 1}; retrying with a simpler one")
+                    log(f"{model} rejected the '{fmt}' request format; retrying with a simpler one")
                     continue
                 raise
         else:  # pragma: no cover
@@ -127,8 +152,9 @@ class GeminiProvider(Provider):
             "model_version": res.get("modelVersion"),
             "usage": {"input_tokens": usage.get("promptTokenCount"), "output_tokens": usage.get("candidatesTokenCount"),
                       "thinking_tokens": usage.get("thoughtsTokenCount")} if usage else None,
-            "images_sent": len(parts) - 1,
+            "images_sent": len(images),
             "output_format": used_format,
+            "model_source": "your choice (Settings)" if C.GEMINI_MODEL else "auto-detected",
         }
         return parse_json_loose(out)
 

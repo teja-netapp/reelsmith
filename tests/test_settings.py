@@ -17,7 +17,29 @@ def client(monkeypatch):
     from app.main import app
     from app.providers.base import ProviderError
 
+    MODELS = {"gemini-3.1-flash-lite": 65536, "gemma-3-27b-it": 8192, "gemini-2.5-pro": 65536,
+              "gemini-4-hydrogen": 65536, "gemini-3.5-flash": 65536}
+
     def fake_http(url, payload=None, headers=None, **kw):
+        if "generativelanguage" in url and "/models/" in url and headers.get("x-goog-api-key") == GOOD_G:
+            name = url.split("/models/", 1)[1].split(":")[0]
+            if name not in MODELS:
+                e = ProviderError('HTTP 404: {"error": {"code": 404, "message": "models/%s is not found"}}' % name)
+                e.status = 404
+                raise e
+            if ":generateContent" not in url:
+                return {"name": f"models/{name}", "outputTokenLimit": MODELS[name],
+                        "supportedGenerationMethods": ["generateContent"]}
+            if name == "gemini-2.5-pro":   # exists, but no free-tier quota for this key
+                e = ProviderError('HTTP 429: {"error": {"message": "Quota exceeded for metric: generativelanguage.'
+                                  'googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.5-pro"}}')
+                e.status = 429
+                raise e
+            if name.startswith("gemma") and "responseMimeType" in payload.get("generationConfig", {}):
+                e = ProviderError('HTTP 400: {"error": {"message": "JSON mode is not enabled for models/gemma-3-27b-it"}}')
+                e.status = 400
+                raise e
+            return {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]}
         if "generativelanguage" in url:
             if headers.get("x-goog-api-key") == GOOD_G:
                 return {"models": [
@@ -118,6 +140,46 @@ def test_input_validation(client):
     assert c.post("/api/settings", json={"gemini": {"key": "line\nbreak-123456789"}}).status_code == 400
     assert c.post("/api/settings", json={"ollama": {"host": "not a url"}}).status_code == 400
     assert c.post("/api/settings", json={"default_editor": "chatgpt"}).status_code == 400
+
+
+def test_custom_gemini_model_saved_and_used(client):
+    c, C, env = client
+    # paste key + type a free-tier model name (as copied from the docs, with the "models/" prefix)
+    r = c.post("/api/settings", json={"gemini": {"key": GOOD_G, "model": "models/gemini-3.1-flash-lite"}})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["results"]["gemini_model"]["ok"] and body["results"]["gemini_model"]["json_mode"]
+    assert "GEMINI_MODEL=gemini-3.1-flash-lite" in env.read_text()
+    assert C.GEMINI_MODEL == "gemini-3.1-flash-lite"
+    assert body["settings"]["gemini"]["model"] == "gemini-3.1-flash-lite"
+    assert c.get("/api/config").json()["providers"]["gemini"]["detail"] == "gemini-3.1-flash-lite"
+    # back to Auto
+    r = c.post("/api/settings", json={"gemini": {"model": ""}}).json()
+    assert C.GEMINI_MODEL == "" and r["settings"]["gemini"]["model"] == ""
+
+
+def test_unknown_model_is_not_saved(client):
+    c, C, env = client
+    c.post("/api/settings", json={"gemini": {"key": GOOD_G}})
+    r = c.post("/api/settings", json={"gemini": {"model": "gemini-made-up-9"}})
+    assert r.status_code == 400 and "wasn't found" in r.json()["detail"] and "NOT saved" in r.json()["detail"]
+    assert "gemini-made-up-9" not in env.read_text()
+
+
+def test_model_without_free_quota_warns(client):
+    c, C, env = client
+    c.post("/api/settings", json={"gemini": {"key": GOOD_G}})
+    r = c.post("/api/settings", json={"gemini": {"model": "gemini-2.5-pro"}}).json()
+    assert any("no free-tier quota" in w for w in r["warnings"])
+    assert C.GEMINI_MODEL == "gemini-2.5-pro"   # saved anyway (billing may be enabled later)
+
+
+def test_test_model_button_gemma(client):
+    c, C, env = client
+    # typed key + typed model, nothing saved yet
+    v = c.post("/api/settings/verify", json={"provider": "gemini", "key": GOOD_G, "model": "gemma-3-27b-it"}).json()
+    assert v["ok"] and v["json_mode"] is False and "plain-text fallback" in v["detail"]
+    assert not C.gemini_key() and "gemma" not in env.read_text()
 
 
 def test_cross_site_and_rebinding_blocked(client):

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from . import config as C
 from .providers import CHOICES
@@ -43,7 +44,7 @@ def _api_message(e: Exception) -> str:
 # Verification
 # ----------------------------------------------------------------------------------------------
 def _gemini_models_sorted(names):
-    keep = [n for n in names if n.startswith("gemini") and not any(
+    keep = [n for n in names if n.startswith(("gemini", "gemma")) and not any(
         x in n for x in ("embedding", "tts", "image", "audio", "live", "robotics", "aqa"))]
     pref = {p: i for i, p in enumerate(G.PREFERRED)}
     return sorted(set(keep), key=lambda n: (pref.get(n, 99), n))
@@ -69,6 +70,65 @@ def verify_gemini(key: str) -> dict:
     return {"ok": True, "auth": True, "models": models, "will_use": pick, "hydrogen": hyd,
             "detail": f"Key works · {len(models)} Gemini models · will use {pick or 'auto'}"
                       + ("" if hyd else " (Gemini 4 Hydrogen isn't available to this key)")}
+
+
+def verify_gemini_model(key: str, model: str) -> dict:
+    """Check that a model name exists AND that this key's tier can actually call it (one tiny request)."""
+    model = G.normalize_model(model)
+    if not model:
+        return {"ok": True, "detail": "Auto: the app picks the best model your key can use"}
+    if not _MODEL_OK.match(model):
+        return {"ok": False, "found": False, "detail": f"'{model}' isn't a valid model name"}
+    if not key:
+        return {"ok": None, "detail": "Save your API key first, then the model can be tested"}
+    h = {"x-goog-api-key": key}
+    try:
+        info = http_json(f"{G.BASE}/models/{model}", headers=h, timeout=15, retries=0)
+    except ProviderError as e:
+        code = getattr(e, "status", None)
+        if code == 404:
+            return {"ok": False, "found": False, "model": model,
+                    "detail": f"'{model}' wasn't found for this key. Check the exact name (it's case-sensitive), "
+                              "e.g. gemini-3.1-flash-lite"}
+        if code in (400, 401, 403):
+            return {"ok": False, "auth": False, "detail": f"Google rejected the key: {_api_message(e)}"}
+        return {"ok": None, "model": model, "detail": f"Couldn't reach Google to check the model: {_api_message(e)}"}
+    methods = info.get("supportedGenerationMethods") or []
+    if methods and "generateContent" not in methods:
+        return {"ok": False, "found": True, "model": model,
+                "detail": f"'{model}' can't write text/JSON (it supports: {', '.join(methods)})"}
+    url = f"{G.BASE}/models/{model}:generateContent"
+    ask = {"contents": [{"role": "user", "parts": [{"text": 'Reply with exactly this JSON: {"ok": true}'}]}]}
+    json_mode = True
+    t0 = time.time()
+    try:
+        try:
+            http_json(url, {**ask, "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 64}},
+                      headers=h, timeout=60, retries=0)
+        except ProviderError as e:
+            if getattr(e, "status", None) != 400:
+                raise
+            json_mode = False  # e.g. Gemma models: no JSON mode -> the app falls back to plain text
+            http_json(url, {**ask, "generationConfig": {"maxOutputTokens": 64}}, headers=h, timeout=60, retries=0)
+    except ProviderError as e:
+        code, raw = getattr(e, "status", None), str(e)
+        if code == 429:
+            if re.search(r"limit:\s*0\b", raw):
+                return {"ok": False, "found": True, "quota": False, "model": model,
+                        "detail": f"'{model}' has no free-tier quota on this key. Pick a Flash or Flash-Lite "
+                                  "model, or enable billing in Google AI Studio"}
+            return {"ok": True, "found": True, "model": model,
+                    "detail": f"'{model}' exists and your key can use it (rate-limited right now: the free tier allows "
+                              "a limited number of requests per minute and per day)"}
+        if code in (401, 403):
+            return {"ok": False, "auth": False, "detail": f"Google rejected the key: {_api_message(e)}"}
+        if code == 400:
+            return {"ok": False, "found": True, "model": model, "detail": f"'{model}' rejected a test request: {_api_message(e)}"}
+        return {"ok": None, "model": model, "detail": f"Couldn't reach Google to test the model: {_api_message(e)}"}
+    return {"ok": True, "found": True, "model": model, "json_mode": json_mode,
+            "display_name": info.get("displayName"), "output_limit": info.get("outputTokenLimit"),
+            "detail": f"'{model}' works with your key · replied in {time.time() - t0:.1f} s · "
+                      + ("JSON output supported" if json_mode else "no JSON mode (the app will use its plain-text fallback)")}
 
 
 def _anthropic_base() -> str:
@@ -125,6 +185,9 @@ def verify(provider: str, key: str | None = None, host: str | None = None, model
            remember: bool = True) -> dict:
     if provider == "gemini":
         k = key if key else C.gemini_key()
+        if model is not None:  # "Test model": check this exact model with this key
+            r = verify_gemini_model(k, model)
+            return r
         r = verify_gemini(k)
     elif provider == "claude":
         k = key if key else (C._env("ANTHROPIC_API_KEY") or C._env("ANTHROPIC_AUTH_TOKEN"))
@@ -211,10 +274,23 @@ def save_settings(body: dict) -> dict:
             results[name] = {k2: v for k2, v in r.items() if k2 != "key_fp"}
         if "model" in part:
             m = str(part.get("model") or "").strip()
+            if name == "gemini":
+                m = G.normalize_model(m)   # accept "models/gemini-…" as copied from the API docs
             if m and not _MODEL_OK.match(m):
                 raise SettingsError(f"Invalid model name: {m}")
             if name == "claude" and not m:
                 m = "claude-sonnet-5-5"
+            if name == "gemini" and m:
+                # your own model choice: make sure it exists and this key's tier can call it
+                key_for_test = updates.get(key_var) or C.gemini_key()
+                mr = verify_gemini_model(key_for_test, m)
+                results["gemini_model"] = mr
+                if mr.get("found") is False:
+                    raise SettingsError(mr["detail"] + " - the model was NOT saved.")
+                if mr.get("ok") is False and mr.get("auth") is False:
+                    raise SettingsError(mr["detail"])
+                if mr.get("ok") is not True:
+                    warnings.append(mr["detail"] + " - saved anyway.")
             updates[model_var] = m
         if name == "gemini" and (part.get("key") or "model" in part or part.get("remove")):
             G._resolved_model = None  # re-detect with the new key / preference

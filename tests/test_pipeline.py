@@ -88,6 +88,8 @@ def test_gemini_editor(media, monkeypatch):
 
     def fake_http(url, payload=None, headers=None, **kw):
         calls.append((url, payload, headers))
+        if url.endswith("/models/gemini-4-hydrogen"):
+            return {"name": "models/gemini-4-hydrogen", "outputTokenLimit": 65536}
         if url.endswith("/models?pageSize=1000"):
             return {"models": [{"name": "models/gemini-3.5-flash", "supportedGenerationMethods": ["generateContent"]},
                                {"name": "models/gemini-4-hydrogen", "supportedGenerationMethods": ["generateContent"]}]}
@@ -102,6 +104,7 @@ def test_gemini_editor(media, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test")
     monkeypatch.setattr(gemini, "http_json", fake_http)
     monkeypatch.setattr(gemini, "_resolved_model", None)
+    monkeypatch.setattr(gemini, "_model_info", {})
     p = plan_edit(analysis, None, {"target_duration": 4, "planner": "gemini"}, "warm film", log=lambda m: None)
     assert p["title"] == "Gemini Cut" and p["planner"] == "Gemini (gemini-4-hydrogen)"
     gen = [c for c in calls if ":generateContent" in c[0]][0]
@@ -109,6 +112,50 @@ def test_gemini_editor(media, monkeypatch):
     assert gen[1]["generationConfig"]["responseMimeType"] == "application/json"
     assert any("inlineData" in part for part in gen[1]["contents"][0]["parts"])
     assert gen[2]["x-goog-api-key"] == "test"
+
+
+def test_gemini_custom_model_without_json_mode(media, monkeypatch):
+    """A model you typed yourself (here: Gemma, which has no system instruction / JSON mode)."""
+    from app import config as C
+    from app.analyze import analyze_clip, score_shots
+    from app.planner import plan_edit
+    from app.providers import gemini
+    from app.providers.base import ProviderError
+    from app.video_io import probe
+
+    import tempfile
+    from pathlib import Path
+    clip, shots = analyze_clip(probe(media["land"]), "c0", None, Path(tempfile.mkdtemp()))
+    score_shots(shots)
+    analysis = {"clips": [clip], "all_shots": shots, "shots": shots, "sheets": [], "transcripts": {}}
+    reqs = []
+
+    def fake_http(url, payload=None, headers=None, **kw):
+        if url.endswith("/models/gemma-3-27b-it"):
+            return {"name": "models/gemma-3-27b-it", "outputTokenLimit": 8192}
+        reqs.append(payload)
+        if "systemInstruction" in payload or "responseMimeType" in payload.get("generationConfig", {}):
+            e = ProviderError('HTTP 400: {"error": {"message": "Developer instruction is not enabled"}}')
+            e.status = 400
+            raise e
+        plan = {"reasoning": "r", "title": "Gemma Cut", "look": "vintage", "segments": [
+            {"shot_id": "c0s00", "start": 0.2, "end": 2.2, "speed": 1, "motion": "push_in", "transition_in": "cut"}]}
+        return {"candidates": [{"content": {"parts": [{"text": "Here you go:\n```json\n" + json.dumps(plan) + "\n```"}]}}]}
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test")
+    monkeypatch.setenv("GEMINI_MODEL", "gemma-3-27b-it")
+    C.reload()
+    monkeypatch.setattr(gemini, "http_json", fake_http)
+    monkeypatch.setattr(gemini, "_model_info", {})
+    try:
+        p = plan_edit(analysis, None, {"target_duration": 2, "planner": "gemini"}, "vintage", log=lambda m: None)
+    finally:
+        monkeypatch.delenv("GEMINI_MODEL")
+        C.reload()
+    assert p["title"] == "Gemma Cut"
+    assert p["editor"]["model"] == "gemma-3-27b-it" and p["editor"]["model_source"] == "your choice (Settings)"
+    assert p["editor"]["output_format"] == "plain text"          # stepped down 4 request formats
+    assert len(reqs) == 4 and all(r["generationConfig"]["maxOutputTokens"] == 8192 for r in reqs)
 
 
 def test_claude_editor(media, monkeypatch):

@@ -121,8 +121,17 @@
     else if (v && v.ok) statusChip("st" + name, "ok", `Connected · ${s.masked}`);
     else if (v && v.auth === false) statusChip("st" + name, "bad", `Key rejected · ${s.masked}`);
     else statusChip("st" + name, "warn", `Key saved · ${s.masked} · not checked yet`);
-    if (name === "gemini") fillModels($("gModel"), v && v.models, s.model, "Auto (prefers Gemini 4 Hydrogen)");
-    else fillModels($("cModel"), v && v.models, s.model, "Default (claude-sonnet-5-5)");
+    if (name === "gemini") {
+      // free-text model name with suggestions from the models this key can see
+      const models = (v && v.models) || state.geminiModels || [];
+      if (v && v.models) state.geminiModels = v.models;
+      $("gModels").innerHTML = models.map((m) => `<option value="${esc(m)}"></option>`).join("");
+      $("gModel").value = s.model || "";
+      $("gModelHint").textContent = s.model
+        ? `Using your choice: ${s.model}`
+        : (v && v.will_use ? `Auto currently picks: ${v.will_use}` : "Auto prefers gemini-4-hydrogen, then the newest Flash model");
+      if (models.length) $("gModelHint").textContent += ` · ${models.length} models available to this key (start typing for suggestions)`;
+    } else fillModels($("cModel"), v && v.models, s.model, "Default (claude-sonnet-5-5)");
     $(p + "Shell").classList.toggle("hidden", !s.from_shell);
   }
   function showOllama(o, v) {
@@ -177,9 +186,9 @@
     busyBtn.disabled = true; busyBtn.textContent = "Checking…";
     try {
       const r = await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const res = Object.values(r.results || {})[0];
+      const details = Object.values(r.results || {}).map((x) => esc(x.detail || "Saved"));
       const warn = (r.warnings || []).map(esc).join("<br>");
-      setMsg(msgId, warn ? "warn" : "ok", (res ? esc(res.detail || "Saved") : "Saved") + (warn ? "<br>" + warn : ""));
+      setMsg(msgId, warn ? "warn" : "ok", (details.length ? details.join("<br>") : "Saved") + (warn ? "<br>" + warn : ""));
       return r;
     } catch (e) {
       setMsg(msgId, "bad", esc(e.message));
@@ -215,6 +224,19 @@
     };
     $(p + "Key").addEventListener("keydown", (e) => { if (e.key === "Enter") $(p + "Save").click(); });
   }
+  $("gModelTest").onclick = async () => {
+    const btn = $("gModelTest"), model = $("gModel").value.trim(), key = $("gKey").value.trim();
+    btn.disabled = true; btn.textContent = "Testing…";
+    try {
+      // tests the typed model with the typed (unsaved) key, or with the saved key
+      const v = await api("/api/settings/verify", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "gemini", model, ...(key ? { key } : {}) }) });
+      setMsg("gMsg", v.ok ? "ok" : (v.ok === false ? "bad" : "warn"),
+        esc(v.detail) + (v.ok && model ? " · click <b>Save &amp; verify</b> to use it" : ""));
+    } catch (e) { setMsg("gMsg", "bad", esc(e.message)); }
+    finally { btn.disabled = false; btn.textContent = "Test model"; }
+  };
+  $("gModel").addEventListener("keydown", (e) => { if (e.key === "Enter") $("gSave").click(); });
   $("oSave").onclick = async () => {
     const r = await saveSettings({ ollama: { host: $("oHost").value.trim(), model: $("oModel").value, plan_model: "" } }, "oMsg", $("oSave"));
     if (r) { showOllama(r.settings.ollama, r.results.ollama); }
@@ -410,7 +432,8 @@
     // editor
     const u = ed.usage || {};
     let edHtml = `<div class="big">${esc(ed.label || "?")}</div>` + kv([
-      ["Model", ed.model ? `<code>${esc(ed.model)}</code>${ed.model_version ? ` <span class="sub">(${esc(ed.model_version)})</span>` : ""}` : "none (rules only)"],
+      ["Model", ed.model ? `<code>${esc(ed.model)}</code>${ed.model_version ? ` <span class="sub">(${esc(ed.model_version)})</span>` : ""}${ed.model_source ? ` <span class="sub">· ${esc(ed.model_source)}</span>` : ""}` : "none (rules only)"],
+      ed.output_format ? ["Output", esc(ed.output_format)] : null,
       ed.shot_log_model ? ["Shot log", `<code>${esc(ed.shot_log_model)}</code> · ${ed.shots_shown} shots (${ed.shots_logged} new, ${ed.shots_cached} cached${ed.shots_failed ? ", " + ed.shots_failed + " failed" : ""})`] : null,
       ed.runs_on ? ["Runs on", esc(ed.runs_on)] : null,
       (u.input_tokens || u.output_tokens) ? ["Tokens", `${n2(u.input_tokens)} in · ${n2(u.output_tokens)} out${u.thinking_tokens ? " · " + n2(u.thinking_tokens) + " thinking" : ""}`] : null,

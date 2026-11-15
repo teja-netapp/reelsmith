@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+- **Choose your own Gemini model.** In Settings → Google Gemini, type any model name in the Model field (e.g. a free-tier `gemini-3.1-flash-lite`), or leave it empty for Auto. Suggestions list every model your key can see, including Gemma.
+- **Test model button.** It checks that the name exists and makes one tiny request, so you know your key's tier can actually use the model:
+  - an unknown name is refused and not saved;
+  - a model with no free-tier quota (`limit: 0`) gets a clear warning;
+  - models without JSON mode are detected.
+- **Works with more models:**
+  - Requests step down from strict JSON-schema output to plain text. This covers models without system instructions or JSON mode, such as Gemma.
+  - The output token limit is read from the model itself.
+  - A `models/` prefix copied from the docs is accepted.
+- The edit report shows whether the model was **your choice** or **auto-detected**, and which output format worked.
+
 ## 0.4.0
 - **New: Settings in the app (⚙ Settings, or click the Gemini / Local AI pill).** You no longer need to edit `.env` by hand.
   - **Gemini and Claude API keys:** paste a key and click *Save & verify*. The key is checked with Google or Anthropic **before** it's saved, and a rejected key is never written. If you're offline, the key is saved with a warning.

@@ -169,8 +169,14 @@
         </div>
         <small class="muted"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get a free key in Google AI Studio →</a>
           (this is separate from your Gemini app subscription)</small>
-        <label class="lbl" for="gModel">Model</label>
-        <select id="gModel"><option value="">Auto (prefers Gemini 4 Hydrogen)</option></select>
+        <label class="lbl" for="gModel">Model <span class="muted">· type any model name, or leave empty for Auto</span></label>
+        <div class="keyrow">
+          <input type="text" id="gModel" list="gModels" spellcheck="false" autocomplete="off" autocapitalize="off"
+                 placeholder="Auto, or e.g. gemini-3.1-flash-lite">
+          <button class="ghost sm" id="gModelTest" type="button">Test model</button>
+        </div>
+        <datalist id="gModels"></datalist>
+        <small class="muted" id="gModelHint"></small>
         <div class="btns">
           <button class="primary sm" id="gSave">Save &amp; verify</button>
           <button class="ghost sm" id="gTest">Test saved key</button>

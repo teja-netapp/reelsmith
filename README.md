@@ -19,7 +19,8 @@ Pick one per reel in the app, or set `LLM_PROVIDER` in `.env`. **Auto** uses the
 
 Open **⚙ Settings** in the top bar, or click the Gemini / Local AI status pill.
 
-- **Gemini / Claude:** paste a key and click **Save & verify**. The key is checked with Google or Anthropic first, and a rejected key is never saved. Once saved, the key only appears masked (`AIza…abcd`). Use **Test saved key** or **Remove key** to manage it, and pick from the models your key can use.
+- **Gemini / Claude:** paste a key and click **Save & verify**. The key is checked with Google or Anthropic first, and a rejected key is never saved. Once saved, the key only appears masked (`AIza…abcd`). Use **Test saved key** or **Remove key** to manage it.
+- **Your own Gemini model:** type any model name (e.g. a free-tier `gemini-3.1-flash-lite`), or leave it empty for Auto. **Test model** makes one tiny request to confirm your key's tier can use it. Unknown names are refused, and models with no free quota get a warning.
 - **Local AI (Ollama):** set the address and model, then click **Test connection**. If the model isn't downloaded yet, the panel shows the exact `ollama pull …` command.
 - **Default AI editor:** the editor new reels start with.
 
