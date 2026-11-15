@@ -13,17 +13,40 @@ You drop in clips or full-length videos, add an optional music track and describ
 
 Pick one per reel in the app, or set `LLM_PROVIDER` in `.env`. **Auto** uses the first editor that's ready, in this order: Claude → Gemini → Local → Rules. If an editor fails (no network, quota, a bad key), the reel falls back to the next one, so you always get a video.
 
-> Your **Gemini app subscription is not an API key.** Get a free key at <https://aistudio.google.com/apikey> and paste it into `.env` as `GEMINI_API_KEY`. The API is billed separately from the app subscription. The free tier is enough for personal use; with paid billing a reel costs roughly a few cents.
+> Your **Gemini app subscription is not an API key.** Get a free key at <https://aistudio.google.com/apikey>, then in the app open **⚙ Settings → Google Gemini**, paste it and click **Save & verify**. The API is billed separately from the app subscription. The free tier is enough for personal use; with paid billing a reel costs roughly a few cents.
+
+### Settings (API keys, models, default editor)
+
+Open **⚙ Settings** in the top bar, or click the Gemini / Local AI status pill.
+
+- **Gemini / Claude:** paste a key and click **Save & verify**. The key is checked with Google or Anthropic first, and a rejected key is never saved. Once saved, the key only appears masked (`AIza…abcd`). Use **Test saved key** or **Remove key** to manage it, and pick from the models your key can use.
+- **Local AI (Ollama):** set the address and model, then click **Test connection**. If the model isn't downloaded yet, the panel shows the exact `ollama pull …` command.
+- **Default AI editor:** the editor new reels start with.
+
+Changes apply immediately, without a restart. They're stored in `.env` on this Mac, which is git-ignored and readable only by you. Editing `.env` by hand still works too.
+
+The app only answers requests to `localhost` and refuses changes coming from other websites, so it's safe to keep it running while you browse.
 
 All editors follow the same **editing playbook** (`app/playbook.py`): hook in the first second, pacing that matches the mood, rare and well-chosen transitions, story flow, speech-aware audio, beat sync. Every plan then goes through the **craft pass** (`app/craft.py`), which acts as an assistant editor and fixes rule breaks before rendering.
+
+## See exactly how each reel was made
+
+Under the video, **How this reel was made** shows the following for every version (v1, v2, …):
+
+- **Editor:** the editor and exact model (e.g. `qwen3-vl:8b-instruct` or `gemini-4-hydrogen`), with token counts and planning time. It also lists which editors were skipped or failed first.
+- **Brief and settings:** what you asked for and the options used.
+- **Look and sound:** the color grade, finishing, text, captions and music.
+- **Edit decision list:** each shot's source clip and in/out points, time on screen, speed, camera move, transition, reframing, sound and beat adjustment. Click a row to jump there.
+- **Changes made automatically:** every fix made after the AI's plan, with the reason.
+
+You can download the report as Markdown or JSON, and download **the AI's raw plan** to compare what the model wrote with what was rendered. The editor and model are also written into the MP4's metadata (`ffprobe -show_entries format_tags reel.mp4`).
 
 ## Quick start (macOS)
 
 ```bash
 git clone <your repo url> reelsmith && cd reelsmith     # or unzip the folder
 ./setup.sh      # FFmpeg, Python deps, Ollama + qwen3-vl:8b-instruct (~6 GB), face model, fonts, Whisper
-open -e .env    # optional: paste GEMINI_API_KEY=...
-./run.sh        # opens http://127.0.0.1:8765
+./run.sh        # opens http://127.0.0.1:8765. Then ⚙ Settings to add your Gemini key (optional)
 ```
 
 `SKIP_OLLAMA=1 ./setup.sh` skips the local model if you only want Gemini.

@@ -16,6 +16,7 @@ FAKE_OLLAMA_PORT = 11987
 _WS = tempfile.mkdtemp(prefix="reelsmith-test-")
 # configure BEFORE the app is imported (config is read at import time)
 os.environ["REELSMITH_WORKSPACE"] = _WS
+os.environ["REELSMITH_ENV_FILE"] = os.path.join(_WS, "test.env")  # never touch your real .env
 os.environ["OLLAMA_HOST"] = f"http://127.0.0.1:{FAKE_OLLAMA_PORT}"
 os.environ["OLLAMA_MODEL"] = "qwen3-vl:8b-instruct"
 os.environ["LLM_PROVIDER"] = "auto"

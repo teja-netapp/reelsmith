@@ -1,10 +1,10 @@
 """AI editor providers. 'auto' tries Claude -> Gemini -> local Ollama -> offline rules."""
 from __future__ import annotations
 
-from ..config import LLM_PROVIDER
+from .. import config as C
 from .base import Provider, ProviderError
 
-__all__ = ["Provider", "ProviderError", "PROVIDERS", "CHOICES", "chain", "statuses"]
+__all__ = ["Provider", "ProviderError", "PROVIDERS", "CHOICES", "chain", "chain_with_skips", "statuses"]
 from .claude import ClaudeProvider
 from .gemini import GeminiProvider
 from .ollama import OllamaProvider
@@ -24,11 +24,23 @@ def statuses() -> dict:
     return out
 
 
-def chain(choice: str | None) -> list[Provider]:
-    """Providers to try, in order. The heuristic planner is always the final fallback."""
-    choice = (choice or LLM_PROVIDER or "auto").lower()
+def chain_with_skips(choice: str | None) -> tuple[list[Provider], list[dict]]:
+    """Providers to try, in order (the heuristic planner is always the final fallback), plus the
+    editors 'auto' skipped and why - recorded in the edit report."""
+    choice = (choice or C.LLM_PROVIDER or "auto").lower()
     if choice == "heuristic":
-        return []
+        return [], []
     if choice in PROVIDERS:
-        return [PROVIDERS[choice]]
-    return [PROVIDERS[k] for k in AUTO_ORDER if PROVIDERS[k].status().get("available")]
+        return [PROVIDERS[choice]], []
+    use, skipped = [], []
+    for k in AUTO_ORDER:
+        st = PROVIDERS[k].status()
+        if st.get("available"):
+            use.append(PROVIDERS[k])
+        else:
+            skipped.append({"provider": k, "reason": st.get("detail", "not available")})
+    return use, skipped
+
+
+def chain(choice: str | None) -> list[Provider]:
+    return chain_with_skips(choice)[0]

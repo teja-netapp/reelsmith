@@ -105,6 +105,30 @@
             <div class="timeline" id="timeline"></div>
           </div>
 
+          <div class="card hidden" id="reportCard">
+            <div class="rep-head">
+              <h3>How this reel was made</h3>
+              <div class="versions" id="versions"></div>
+            </div>
+            <div class="rep-grid">
+              <section><h4>Editor</h4><div id="repEditor"></div></section>
+              <section><h4>Brief &amp; settings</h4><div id="repBrief"></div></section>
+              <section><h4>Look &amp; sound</h4><div id="repLook"></div></section>
+            </div>
+            <h4>Edit decision list <span class="muted small">click a row to jump there in the video</span></h4>
+            <div class="edl-wrap"><table class="edl" id="repEdl"></table></div>
+            <h4>Changes made automatically <span class="badge" id="repCount"></span></h4>
+            <div id="repChanges"></div>
+            <div class="rep-foot">
+              <span class="muted small" id="repRender"></span>
+              <span class="dl">
+                <a id="dlMd" href="#">Report (.md)</a>
+                <a id="dlJson" href="#" target="_blank">Report (.json)</a>
+                <a id="dlAi" href="#">AI's raw plan</a>
+              </span>
+            </div>
+          </div>
+
           <div class="card hidden" id="refineCard">
             <h3>Revise with words</h3>
             <textarea id="feedback" rows="3" placeholder="Make it punchier, open on the drone shot, add more slow-mo, warmer colours…"></textarea>
@@ -125,6 +149,88 @@
       </div>
     </section>
   </main>
+  <!-- ============ Settings: API keys & AI editors ============ -->
+  <div class="modal hidden" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="setTitle">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2 id="setTitle">AI editors &amp; API keys</h2>
+        <button class="x" id="setClose" aria-label="Close">✕</button>
+      </div>
+      <p class="muted small intro">Keys are checked with the provider <b>before</b> they're saved. They're stored only in
+        <code id="setEnv">.env</code> on this Mac (git-ignored, readable only by you) and never shown in full again.
+        Changes apply immediately. No restart needed.</p>
+
+      <section class="prov">
+        <div class="prov-head"><b>Google Gemini</b><span class="st" id="stgemini">…</span></div>
+        <label class="lbl" for="gKey">API key</label>
+        <div class="keyrow">
+          <input type="password" id="gKey" autocomplete="off" spellcheck="false" placeholder="Paste your API key">
+          <button class="ghost sm" data-show="gKey" type="button">Show</button>
+        </div>
+        <small class="muted"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get a free key in Google AI Studio →</a>
+          (this is separate from your Gemini app subscription)</small>
+        <label class="lbl" for="gModel">Model</label>
+        <select id="gModel"><option value="">Auto (prefers Gemini 4 Hydrogen)</option></select>
+        <div class="btns">
+          <button class="primary sm" id="gSave">Save &amp; verify</button>
+          <button class="ghost sm" id="gTest">Test saved key</button>
+          <button class="ghost sm danger" id="gRemove">Remove key</button>
+        </div>
+        <div class="msg" id="gMsg"></div>
+        <div class="msg warn hidden" id="gShell">This key is also set in your shell (e.g. ~/.zshrc). The shell value wins when the app restarts.</div>
+        <small class="muted">On the free tier, Google may use the thumbnails and brief you send to improve its products.</small>
+      </section>
+
+      <section class="prov">
+        <div class="prov-head"><b>Local AI (Ollama)</b><span class="st" id="stollama">…</span></div>
+        <label class="lbl" for="oHost">Ollama address</label>
+        <input type="text" id="oHost" spellcheck="false" placeholder="http://127.0.0.1:11434">
+        <label class="lbl" for="oModel">Model</label>
+        <select id="oModel"></select>
+        <div class="btns">
+          <button class="primary sm" id="oSave">Save &amp; connect</button>
+          <button class="ghost sm" id="oTest">Test connection</button>
+        </div>
+        <div class="msg" id="oMsg"></div>
+        <small class="muted">Free and private. No key needed. For a 16 GB Mac use qwen3-vl:8b-instruct, or qwen3-vl:4b-instruct if you want it faster.</small>
+      </section>
+
+      <section class="prov">
+        <div class="prov-head"><b>Anthropic Claude</b> <span class="muted small">optional</span><span class="st" id="stclaude">…</span></div>
+        <label class="lbl" for="cKey">API key</label>
+        <div class="keyrow">
+          <input type="password" id="cKey" autocomplete="off" spellcheck="false" placeholder="Paste your API key">
+          <button class="ghost sm" data-show="cKey" type="button">Show</button>
+        </div>
+        <small class="muted"><a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Create a key in the Anthropic Console →</a></small>
+        <label class="lbl" for="cModel">Model</label>
+        <select id="cModel"><option value="">Default (claude-sonnet-5-5)</option></select>
+        <div class="btns">
+          <button class="primary sm" id="cSave">Save &amp; verify</button>
+          <button class="ghost sm" id="cTest">Test saved key</button>
+          <button class="ghost sm danger" id="cRemove">Remove key</button>
+        </div>
+        <div class="msg" id="cMsg"></div>
+        <div class="msg warn hidden" id="cShell">This key is also set in your shell (e.g. ~/.zshrc). The shell value wins when the app restarts.</div>
+      </section>
+
+      <section class="prov">
+        <div class="prov-head"><b>Default AI editor</b></div>
+        <div class="keyrow">
+          <select id="dEditor">
+            <option value="auto">Auto: Claude → Gemini → Local AI → Rules</option>
+            <option value="gemini">Gemini</option>
+            <option value="ollama">Local AI (Ollama)</option>
+            <option value="claude">Claude</option>
+            <option value="heuristic">Rules only (no AI)</option>
+          </select>
+          <button class="primary sm" id="dSave">Save</button>
+        </div>
+        <div class="msg" id="dMsg"></div>
+      </section>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

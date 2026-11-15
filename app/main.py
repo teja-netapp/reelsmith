@@ -6,23 +6,56 @@ import os
 import re
 from typing import List, Optional
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from urllib.parse import urlparse
+
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from . import config as C
+from . import settings as S
 from .audio import whisper_available
-from .config import FACE_MODEL, LLM_PROVIDER, WEB_DIR
+from .config import FACE_MODEL, WEB_DIR
 from .effects import CAPTION_STYLES, LOOK_DESCRIPTIONS, TEXT_STYLES
 from .pipeline import DEFAULT_OPTIONS, Job, Runner
 from .providers import CHOICES, statuses
 from .reframe import MOTIONS
+from .report import report_markdown
 from .transitions import TRANSITIONS
 from .video_io import check_ffmpeg, video_encoder
 
 app = FastAPI(title="Reelsmith")
 runner = Runner()
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
+# The app holds your API keys, so it only answers requests addressed to this Mac (blocks DNS-rebinding)
+# and refuses changes coming from other websites open in your browser (blocks cross-site requests).
+_LOCAL = {"127.0.0.1", "localhost", "::1", "testserver"} | {
+    h.strip() for h in os.environ.get("REELSMITH_ALLOWED_HOSTS", "").split(",") if h.strip()}
+
+
+def _hostname(value: str) -> str:
+    try:
+        return (urlparse("//" + value).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+@app.middleware("http")
+async def local_only(request: Request, call_next):
+    if _hostname(request.headers.get("host", "")) not in _LOCAL:
+        return JSONResponse({"detail": "Reelsmith only accepts requests to localhost."}, status_code=403)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if origin and origin != "null" and (urlparse(origin).hostname or "").lower() not in _LOCAL:
+            return JSONResponse({"detail": "Cross-site request blocked."}, status_code=403)
+        if origin == "null":
+            return JSONResponse({"detail": "Cross-site request blocked."}, status_code=403)
+    resp = await call_next(request)
+    if request.url.path.startswith("/api/settings"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mts", ".m2ts", ".3gp", ".hevc"}
 
@@ -77,7 +110,7 @@ def config():
     return {
         "version": __version__,
         "providers": statuses(),
-        "default_planner": LLM_PROVIDER if LLM_PROVIDER in CHOICES else "auto",
+        "default_planner": C.LLM_PROVIDER if C.LLM_PROVIDER in CHOICES else "auto",
         "whisper": whisper_available(),
         "face_model": FACE_MODEL.exists(),
         "ffmpeg": check_ffmpeg(),
@@ -89,6 +122,32 @@ def config():
         "caption_styles": list(CAPTION_STYLES),
         "defaults": DEFAULT_OPTIONS,
     }
+
+
+@app.get("/api/settings")
+def get_settings():
+    """AI editor settings. API keys are only ever returned masked."""
+    return S.get_settings()
+
+
+@app.post("/api/settings/verify")
+def verify_settings(body: dict = Body(...)):
+    """Check a key (typed but not saved yet, or the saved one if 'key' is empty) / the Ollama connection."""
+    try:
+        return S.verify(str(body.get("provider", "")), key=(body.get("key") or "").strip() or None,
+                        host=body.get("host") or None, model=body.get("model") or None,
+                        remember=not body.get("key"))
+    except S.SettingsError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/settings")
+def save_settings(body: dict = Body(...)):
+    """Save keys/models (verified first; a rejected key is never saved). Applies immediately, no restart."""
+    try:
+        return S.save_settings(body)
+    except S.SettingsError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/jobs")
@@ -148,15 +207,50 @@ def get_job(job_id: str):
     return _get(job_id).to_public()
 
 
+def _slug(job: Job) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", (job.plan or {}).get("title") or "reel").strip("-").lower() or "reel"
+
+
 @app.get("/api/jobs/{job_id}/output")
-def get_output(job_id: str, download: int = 0):
+def get_output(job_id: str, download: int = 0, v: int = 0):
     job = _get(job_id)
-    if not job.output or not os.path.exists(job.output):
+    path = job.output_for(v) or job.output
+    if not path or not os.path.exists(path):
         raise HTTPException(404, "no output yet")
+    ver = v if job.output_for(v) else job.version
     if download:
-        title = re.sub(r"[^A-Za-z0-9]+", "-", (job.plan or {}).get("title") or "reel").strip("-").lower() or "reel"
-        return FileResponse(job.output, media_type="video/mp4", filename=f"{title}-v{job.version}.mp4")
-    return FileResponse(job.output, media_type="video/mp4")
+        return FileResponse(path, media_type="video/mp4", filename=f"{_slug(job)}-v{ver}.mp4")
+    return FileResponse(path, media_type="video/mp4")
+
+
+def _report(job: Job, v: int) -> dict:
+    p = job.report_path(v or job.version)
+    if not p.exists():
+        raise HTTPException(404, "no report for this version")
+    return json.loads(p.read_text())
+
+
+@app.get("/api/jobs/{job_id}/report")
+def get_report(job_id: str, v: int = 0):
+    return _report(_get(job_id), v)
+
+
+@app.get("/api/jobs/{job_id}/report.md")
+def get_report_md(job_id: str, v: int = 0):
+    job = _get(job_id)
+    r = _report(job, v)
+    return PlainTextResponse(report_markdown(r), media_type="text/markdown",
+                             headers={"Content-Disposition": f'attachment; filename="{_slug(job)}-v{r["version"]}-report.md"'})
+
+
+@app.get("/api/jobs/{job_id}/ai_plan")
+def get_ai_plan(job_id: str, v: int = 0):
+    """The editor's raw plan exactly as the AI returned it, before validation / assistant-editor fixes."""
+    job = _get(job_id)
+    p = job.dir / f"ai_plan_v{v or job.version}.json"
+    if not p.exists():
+        raise HTTPException(404, "no raw plan for this version")
+    return FileResponse(str(p), media_type="application/json", filename=f"{_slug(job)}-v{v or job.version}-ai-plan.json")
 
 
 @app.get("/api/jobs/{job_id}/thumb/{shot_id}")

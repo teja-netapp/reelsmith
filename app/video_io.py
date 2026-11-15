@@ -306,14 +306,16 @@ def grab_frame(path: str, info: MediaInfo, t: float, width: int = 480) -> np.nda
     return np.frombuffer(res.stdout[: w * h * 3], np.uint8).reshape(h, w, 3).copy()
 
 
-def mux(video_path: str, audio_path: str | None, out_path: str):
+def mux(video_path: str, audio_path: str | None, out_path: str, metadata: dict | None = None):
     cmd = [FFMPEG, "-y", "-nostdin", "-v", "error", "-i", video_path]
     if audio_path:
         cmd += ["-i", audio_path, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-shortest"]
     else:
         cmd += ["-c:v", "copy"]
-    cmd += ["-movflags", "+faststart", out_path]
+    for k, v in (metadata or {}).items():  # e.g. title / comment: which editor + model made it
+        cmd += ["-metadata", f"{k}={v}"]
+    cmd += ["-movflags", "+faststart+use_metadata_tags", out_path]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         raise FFmpegError("mux failed: " + res.stderr[-600:])

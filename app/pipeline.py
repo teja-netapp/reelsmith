@@ -10,10 +10,12 @@ import uuid
 
 from . import analyze as A
 from .audio import analyze_music, transcribe, whisper_available
-from .config import FACE_MODEL, MAX_SHOTS_FOR_PLANNER, WORKSPACE
+from . import config as C
+from .config import FACE_MODEL, WORKSPACE
 from .planner import plan_edit, refine_edit, sanitize_plan
 from .reframe import FaceDetector
 from .render import RenderSettings, render
+from .report import build_report, mp4_metadata
 from .timeline import build_timeline
 from .video_io import probe
 
@@ -57,6 +59,7 @@ class Job:
         self.timeline_summary: dict | None = None
         self.version = 0
         self.output: str | None = None
+        self.versions: list[dict] = []   # history: one entry per rendered version
         self.created = time.time()
         self.lock = threading.Lock()
 
@@ -64,7 +67,7 @@ class Job:
     def save(self):
         state = {k: getattr(self, k) for k in ("id", "status", "stage", "progress", "error", "clips", "music",
                                                "description", "options", "plan", "timeline_summary", "version",
-                                               "output", "created")}
+                                               "output", "versions", "created")}
         state["logs"] = self.logs[-200:]
         (self.dir / "job.json").write_text(json.dumps(state, indent=1, default=str))
         if self.analysis is not None:
@@ -97,12 +100,33 @@ class Job:
         if stage is not None and stage != self.stage:
             self.stage = stage
 
+    def report_path(self, version: int | None = None):
+        return self.dir / f"report_v{version or self.version}.json"
+
+    def output_for(self, version: int | None = None) -> str | None:
+        if version:
+            for v in self.versions:
+                if v["version"] == version and os.path.exists(v["output"]):
+                    return v["output"]
+            return None
+        return self.output
+
     def to_public(self) -> dict:
+        report = None
+        rp = self.report_path()
+        if self.version and rp.exists():
+            try:
+                report = json.loads(rp.read_text())
+            except Exception:
+                report = None
         return {
             "id": self.id, "status": self.status, "stage": self.stage, "progress": self.progress,
             "error": self.error, "logs": self.logs[-30:], "description": self.description,
             "options": self.options, "plan": self.plan, "timeline": self.timeline_summary,
             "version": self.version,
+            "versions": [{k: v.get(k) for k in ("version", "created", "trigger", "feedback", "editor", "model",
+                                                "duration", "look")} for v in self.versions],
+            "report": report,
             "output_url": f"/api/jobs/{self.id}/output?v={self.version}" if self.output else None,
             "clips": [os.path.basename(c) for c in self.clips],
             "music": os.path.basename(self.music) if self.music else None,
@@ -136,7 +160,7 @@ def run_analysis(job: Job):
     if not clips:
         raise RuntimeError("No usable video clips were uploaded")
     A.score_shots(shots)
-    selected = A.select_shots(shots, MAX_SHOTS_FOR_PLANNER, [c["id"] for c in clips])
+    selected = A.select_shots(shots, C.MAX_SHOTS_FOR_PLANNER, [c["id"] for c in clips])
     sheets = A.make_contact_sheets(selected, job.dir / "sheets")
     analysis = {"clips": clips, "all_shots": shots, "shots": selected, "sheets": sheets, "transcripts": {}}
 
@@ -177,8 +201,10 @@ def run_analysis(job: Job):
                               "energy_half_seconds": [], "suggested_start": 0.0}
 
 
-def run_render(job: Job):
+def run_render(job: Job, trigger: dict | None = None, ai_plan: dict | None = None, timings: dict | None = None):
     opts = job.options
+    trigger = trigger or {"type": "new"}
+    timings = dict(timings or {})
     job.set(0.52, "Building timeline")
     tl = build_timeline(job.plan, job.analysis, job.music_info, opts)
     job.timeline_summary = {
@@ -197,10 +223,28 @@ def run_render(job: Job):
     def prog(p, msg):
         job.set(0.55 + 0.44 * p, msg)
 
-    render(tl, job.plan, job.music_info, str(out), str(job.dir / "tmp"), settings, face_detector(),
-           opts.get("smart_reframe", True), prog, job.log)
+    t0 = time.time()
+    res = render(tl, job.plan, job.music_info, str(out), str(job.dir / "tmp"), settings, face_detector(),
+                 opts.get("smart_reframe", True), prog, job.log, metadata=mp4_metadata(job.plan, tl, job.version))
+    timings["render"] = round(time.time() - t0, 1)
+    timings["total"] = round(sum(v for k, v in timings.items() if k != "total"), 1)
     job.output = str(out)
-    (job.dir / f"plan_v{job.version}.json").write_text(json.dumps(job.plan, indent=1))
+    v = job.version
+    (job.dir / f"plan_v{v}.json").write_text(json.dumps(job.plan, indent=1))
+    if ai_plan is not None:
+        (job.dir / f"ai_plan_v{v}.json").write_text(json.dumps(ai_plan, indent=1, default=str))
+    report = build_report(job, tl, job.plan, settings, res, trigger, timings, str(out))
+    report["files"].update({"plan": f"plan_v{v}.json", "ai_plan": f"ai_plan_v{v}.json" if ai_plan is not None else None})
+    job.report_path(v).write_text(json.dumps(report, indent=1, default=str))
+    ed = job.plan.get("editor") or {}
+    job.versions.append({
+        "version": v, "created": time.time(), "trigger": trigger.get("type"), "feedback": trigger.get("feedback"),
+        "editor": ed.get("label") or job.plan.get("planner"), "model": ed.get("model"),
+        "duration": tl["duration"], "look": job.plan.get("look"), "output": str(out),
+    })
+    n_auto = len(job.plan.get("craft_changes", [])) + len(job.plan.get("warnings", []))
+    job.log(f"v{v} made by {ed.get('label')} ({ed.get('model') or 'no model'}); {n_auto} automatic fix(es) - "
+            f"see 'How this reel was made'")
 
 
 def _run(job: Job, mode: str, payload=None):
@@ -209,26 +253,45 @@ def _run(job: Job, mode: str, payload=None):
         def plan_prog(p, msg):
             job.set(0.46 + 0.07 * min(1.0, p), msg)
 
+        timings = {}
+        trigger = {"type": mode}
         if mode == "new":
             job.set(0.01, "Analysing footage")
+            t0 = time.time()
             run_analysis(job)
+            timings["analysis"] = round(time.time() - t0, 1)
             job.save()
             job.set(0.46, "Planning the edit")
+            t0 = time.time()
             job.plan = plan_edit(job.analysis, job.music_info, job.options, job.description, job.log, plan_prog)
+            timings["planning"] = round(time.time() - t0, 1)
         elif mode == "refine":
             job.set(0.46, "Revising the edit")
+            trigger["feedback"] = payload
+            t0 = time.time()
             job.plan = refine_edit(job.plan, payload, job.analysis, job.music_info, job.options, job.description,
                                    job.log, plan_prog)
+            timings["planning"] = round(time.time() - t0, 1)
         elif mode == "plan":
             job.set(0.46, "Validating edited plan")
-            job.plan = sanitize_plan(payload, job.analysis, job.music_info, job.options)
-            job.plan["planner"] = "manual edit"
-        job.log(f"Plan by {job.plan.get('planner')}: '{job.plan.get('title')}', look={job.plan.get('look')}, "
-                f"{len(job.plan['segments'])} segments")
-        for w in job.plan.get("warnings", []) + job.plan.get("craft_notes", []):
-            job.log("note: " + w)
+            prev_editor = (job.plan or {}).get("editor", {}).get("label") or (job.plan or {}).get("planner")
+            clean = {k: v for k, v in payload.items() if not k.startswith("_")}
+            job.plan = sanitize_plan(clean, job.analysis, job.music_info, job.options)
+            job.plan["planner"] = "Manual plan edit"
+            job.plan["editor"] = {"provider": "manual", "label": "Manual plan edit (JSON)", "model": None,
+                                  "based_on": prev_editor}
+            job.plan["_ai_plan"] = clean
+        ai_plan = job.plan.pop("_ai_plan", None)
+        ed = job.plan.get("editor") or {}
+        job.log(f"Plan by {ed.get('label') or job.plan.get('planner')}"
+                + (f" [{ed['model']}]" if ed.get("model") else "")
+                + f": '{job.plan.get('title')}', look={job.plan.get('look')}, {len(job.plan['segments'])} segments")
+        for w in job.plan.get("warnings", []):
+            job.log("validation: " + w)
+        for c in job.plan.get("craft_changes", []):
+            job.log(f"assistant editor [{c['rule']}]: {c['change']}")
         job.save()
-        run_render(job)
+        run_render(job, trigger, ai_plan, timings)
         job.status = "done"
         job.set(1.0, "Done")
     except Exception as e:

@@ -190,6 +190,79 @@ def test_web_api(media, fake_ollama):
     assert j["status"] == "done" and j["version"] == 2
 
 
+def test_edit_report_and_versions(media, fake_ollama):
+    """'How this reel was made': editor/model, every automatic change, version history, MP4 tags."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    c = TestClient(app)
+    with open(media["land"], "rb") as f, open(media["track"], "rb") as t, open(media["music"], "rb") as m:
+        r = c.post("/api/jobs", files=[("clips", ("land.mp4", f, "video/mp4")), ("clips", ("track.mp4", t, "video/mp4")),
+                                       ("music", ("m.mp3", m, "audio/mpeg"))],
+                   data={"description": 'fast night reel "NIGHT RUN"',
+                         "options": json.dumps({**OPTS, "target_duration": 10, "planner": "ollama"})})
+    jid = r.json()["id"]
+
+    def wait(version):
+        for _ in range(240):
+            j = c.get(f"/api/jobs/{jid}").json()
+            if j["status"] in ("done", "error") and j["version"] == version:
+                return j
+            time.sleep(0.5)
+        raise AssertionError("timeout")
+
+    j = wait(1)
+    assert j["status"] == "done", j["error"]
+    rep = j["report"]
+    ed = rep["editor"]
+    assert ed["provider"] == "ollama" and ed["model"] == "qwen3-vl:8b-instruct"
+    assert ed["shot_log_model"] == "qwen3-vl:8b-instruct" and ed["shots_logged"] + ed["shots_cached"] == ed["shots_shown"]
+    assert rep["trigger"]["type"] == "new" and rep["brief"].startswith("fast night reel")
+    # every automatic change is explained
+    ae = rep["changes"]["assistant_editor"]
+    assert ae and all(set(x) == {"rule", "change", "why"} for x in ae)
+    assert any(x["rule"] == "transition restraint" for x in ae)
+    # segments describe source in/out and never reuse the same footage
+    segs = rep["segments"]
+    assert segs and all(s["source_out"] > s["source_in"] for s in segs)
+    by_clip = {}
+    for s in segs:
+        by_clip.setdefault(s["clip"], []).append((s["source_in"], s["source_out"]))
+    for ivs in by_clip.values():
+        for i, a in enumerate(ivs):
+            for b in ivs[i + 1:]:
+                assert min(a[1], b[1]) - max(a[0], b[0]) <= 0.3, f"repeated footage {a} {b}"
+    # MP4 carries the editor + model
+    out = c.get(f"/api/jobs/{jid}/output?v=1")
+    assert out.status_code == 200
+    job_dir = __import__("app.config", fromlist=["WORKSPACE"]).WORKSPACE / "jobs" / jid
+    tags = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags=comment", "-of", "csv=p=0",
+                           str(job_dir / "reel_v1.mp4")], capture_output=True, text=True).stdout
+    assert "qwen3-vl:8b-instruct" in tags
+
+    # revision -> v2 with its own report; v1 still available
+    c.post(f"/api/jobs/{jid}/refine", json={"feedback": "slower and moodier"})
+    j = wait(2)
+    assert [v["trigger"] for v in j["versions"]] == ["new", "refine"]
+    assert j["report"]["trigger"]["feedback"] == "slower and moodier"
+    assert j["report"]["editor"]["shots_logged"] == 0        # shot log reused from cache
+    assert c.get(f"/api/jobs/{jid}/report?v=1").json()["version"] == 1
+    md = c.get(f"/api/jobs/{jid}/report.md?v=2")
+    assert md.status_code == 200 and "## Changes made automatically" in md.text and "qwen3-vl" in md.text
+    ai = c.get(f"/api/jobs/{jid}/ai_plan?v=1").json()
+    assert ai["title"] == "Fake Local Edit" and len(ai["segments"]) == 7   # raw plan, before fixes
+    assert c.get(f"/api/jobs/{jid}/output?v=1&download=1").headers["content-disposition"].endswith('-v1.mp4"')
+
+    # manual JSON edit -> v3 labelled as manual, based on the previous editor
+    plan = j["plan"]
+    plan["look"] = "noir"
+    c.post(f"/api/jobs/{jid}/render", json={"plan": plan})
+    j = wait(3)
+    assert j["report"]["editor"]["provider"] == "manual"
+    assert "Local AI" in j["report"]["editor"]["based_on"]
+    assert j["report"]["finishing"]["look"] == "noir"
+
+
 def test_compact_roundtrip(media):
     from app.analyze import analyze_clip, score_shots
     from app.providers.ollama import compact_to_raw, full_to_compact

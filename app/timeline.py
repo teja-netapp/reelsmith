@@ -12,6 +12,7 @@ def _clamp_transitions(segs, min_solo=3):
         b["m_in"] = max(0, min(b["m_in"], lim))
         if b["m_in"] < 2:
             b["m_in"] = 0
+            b["transition_dropped"] = b["transition_in"]  # shots too short for it -> reported
             b["transition_in"] = "cut"
 
 
@@ -56,7 +57,10 @@ def _snap_to_beats(segs, music, music_start, fps):
             if best_cost is None or cost < best_cost:
                 best, best_cost = (new_n, src_in), cost
         if best:
+            old_n, old_in = s["n_frames"], s["src_in"]
             s["n_frames"], s["src_in"] = best
+            s["beat_delta_s"] = round((s["n_frames"] - old_n) / fps, 3)   # + longer, - shorter on screen
+            s["beat_src_shift_s"] = round(s["src_in"] - old_in, 3)        # in-point moved to make room
             snapped += 1
         F += s["n_frames"] - m_next
     return snapped
@@ -103,6 +107,7 @@ def build_timeline(plan: dict, analysis: dict, music: dict | None, options: dict
                     we = t0 + (w["end"] - a) / s["speed"]
                     if we > vis0 and ws < vis1:
                         words.append({"start": max(ws, vis0), "end": min(we, vis1), "word": w["word"]})
+                        s["caption_words"] = s.get("caption_words", 0) + 1
         words.sort(key=lambda w: w["start"])
 
     # on-screen text

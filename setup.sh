@@ -83,6 +83,6 @@ if [ "${SKIP_OLLAMA:-0}" != "1" ]; then
 fi
 
 say "Done!"
-echo "  • Gemini (optional, recommended): add GEMINI_API_KEY to .env  -> https://aistudio.google.com/apikey"
+echo "  • Gemini (optional, recommended): in the app click ⚙ Settings and paste your key (https://aistudio.google.com/apikey)"
 echo "  • Local AI works out of the box with Ollama ($(envval OLLAMA_MODEL))"
 echo "  • Start the app:  ./run.sh"

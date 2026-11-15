@@ -107,7 +107,7 @@ def _segment_frames(seg: dict, idx: int, st: RenderSettings, face_det: FaceDetec
 
 def render(timeline: dict, plan: dict, music: dict | None, out_path: str, work_dir: str,
            settings: RenderSettings, face_det: FaceDetector | None = None, smart_reframe: bool = True,
-           progress=None, log=print) -> dict:
+           progress=None, log=print, metadata: dict | None = None) -> dict:
     W, H, fps = settings.width, settings.height, settings.fps
     segs = timeline["segments"]
     N = timeline["total_frames"]
@@ -187,7 +187,7 @@ def render(timeline: dict, plan: dict, music: dict | None, out_path: str, work_d
 
     wav = os.path.join(work_dir, "mix.wav")
     has_audio = mix_audio(timeline, plan, music, wav)
-    mux(vid_tmp, wav if has_audio else None, out_path)
+    mux(vid_tmp, wav if has_audio else None, out_path, metadata)
     elapsed = time.time() - t0
     log(f"Rendered {N} frames ({N / fps:.1f}s) in {elapsed:.1f}s")
     return {"frames": N, "duration": N / fps, "render_seconds": round(elapsed, 1), "audio": has_audio}

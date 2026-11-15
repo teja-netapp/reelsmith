@@ -1,6 +1,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { clips: [], music: null, length: 30, quality: "final", planner: "auto", jobId: null, poll: null, lastVersion: 0 };
+  const state = { clips: [], music: null, length: 30, quality: "final", planner: "auto", jobId: null, poll: null,
+    lastVersion: 0, versions: [], viewVersion: 0 };
 
   const EXAMPLES = [
     "Cinematic travel montage, warm film look, slow-mo on the best moments, title \"WANDER\"",
@@ -36,9 +37,9 @@
   const AI_NAMES = { auto: "Auto", gemini: "Gemini", ollama: "Local AI", claude: "Claude", heuristic: "Rules" };
   const AI_HINTS = {
     auto: "Uses the best editor that's available: Claude → Gemini → Local AI → rules.",
-    gemini: "Cloud. Strongest vision + brief-following. Needs GEMINI_API_KEY (free tier available).",
+    gemini: "Cloud. Strongest vision + brief-following. Add a free API key in Settings.",
     ollama: "Free & private on this Mac. Logs every shot first (~3–5 s each, cached), then writes the edit.",
-    claude: "Cloud. Needs ANTHROPIC_API_KEY.",
+    claude: "Cloud. Add an Anthropic API key in Settings.",
     heuristic: "No AI: keyword rules + quality scores. Instant, but ignores detailed instructions.",
   };
   let providers = {};
@@ -49,15 +50,20 @@
       const pick = ["claude", "gemini", "ollama"].find((p) => providers[p] && providers[p].available) || "heuristic";
       txt += ` Right now: ${AI_NAMES[pick]}.`;
     } else if (st && !st.available) txt = `Not ready: ${st.detail}. It will fall back to the next editor.`;
-    $("aiHint").textContent = txt;
+    const none = !["claude", "gemini", "ollama"].some((p) => providers[p] && providers[p].available);
+    $("aiHint").innerHTML = esc(txt) + ((st && !st.available) || none
+      ? ` <a href="#" class="open-settings">Open Settings</a>` : "");
     $("aiHint").classList.toggle("bad", !!(st && !st.available && k !== "auto"));
   }
-  api("/api/config").then((c) => {
+  let configLoaded = false;
+  async function loadConfig() {
+    let c;
+    try { c = await api("/api/config"); } catch (e) { return; }
     providers = c.providers || {};
     if (c.version) $("ver").textContent = "v" + c.version;
     const pv = (k, label) => {
       const s = providers[k] || {};
-      return [s.available ? `${label} · ${s.detail}` : `${label}: ${s.detail || "off"}`, s.available ? "ok" : "warn"];
+      return [s.available ? `${label} · ${s.detail}` : `${label}: ${s.detail || "off"}`, s.available ? "ok" : "warn", true];
     };
     const pills = [
       pv("gemini", "Gemini"), pv("ollama", "Local AI"),
@@ -66,18 +72,173 @@
       [c.face_model ? "Face tracking" : "Saliency tracking", c.face_model ? "ok" : "warn"],
       [c.ffmpeg ? `FFmpeg · ${c.encoder}` : "FFmpeg missing!", c.ffmpeg ? "ok" : "warn"],
     ];
-    $("pills").innerHTML = pills.map(([t, k]) => `<span class="pill ${k}">${esc(t)}</span>`).join("");
+    $("pills").innerHTML = pills.map(([t, k, ai]) =>
+      `<span class="pill ${k}${ai ? " open-settings" : ""}"${ai ? ' title="Open Settings"' : ""}>${esc(t)}</span>`).join("")
+      + `<button class="gear open-settings" title="API keys & AI editors">⚙ Settings</button>`;
     [...$("aiSeg").children].forEach((b) => {
       const s = providers[b.dataset.v];
       b.classList.toggle("na", !!(s && !s.available));
       b.title = s ? (s.available ? s.detail : "Not ready: " + s.detail) : AI_HINTS.auto;
     });
-    let saved = null;
-    try { saved = localStorage.getItem("reelsmith.planner"); } catch (e) {}
-    const initial = saved || c.default_planner || "auto";
-    const btn = [...$("aiSeg").children].find((b) => b.dataset.v === initial);
-    if (btn) btn.click(); else updateHint();
-  }).catch(() => {});
+    if (!configLoaded) {
+      configLoaded = true;
+      let saved = null;
+      try { saved = localStorage.getItem("reelsmith.planner"); } catch (e) {}
+      const initial = saved || c.default_planner || "auto";
+      const btn = [...$("aiSeg").children].find((b) => b.dataset.v === initial);
+      if (btn) btn.click(); else updateHint();
+    } else updateHint();
+  }
+  loadConfig();
+  document.addEventListener("click", (e) => {
+    if (e.target.closest(".open-settings")) { e.preventDefault(); openSettings(); }
+  });
+
+  // ---------- Settings: API keys & AI editors ----------
+  const SET = { gemini: "g", claude: "c" };
+  function setMsg(id, kind, html) {
+    const el = $(id);
+    el.className = "msg " + (kind || "");
+    el.innerHTML = html || "";
+  }
+  function statusChip(id, kind, text) {
+    $(id).className = "st " + kind;
+    $(id).textContent = text;
+  }
+  function fillModels(sel, models, current, autoLabel) {
+    const opts = [`<option value="">${esc(autoLabel)}</option>`].concat(
+      [...new Set([...(models || []), ...(current ? [current] : [])])].map((m) => `<option value="${esc(m)}">${esc(m)}</option>`));
+    sel.innerHTML = opts.join("");
+    sel.value = current || "";
+  }
+  function showCloud(name, s, verified) {
+    const p = SET[name], v = verified || s.verified;
+    $(p + "Key").value = "";
+    $(p + "Key").placeholder = s.configured ? `Saved: ${s.masked} (paste a new key to replace it)` : "Paste your API key";
+    $(p + "Remove").disabled = !s.configured;
+    $(p + "Test").disabled = !s.configured;
+    if (!s.configured) statusChip("st" + name, "off", "Not connected");
+    else if (v && v.ok) statusChip("st" + name, "ok", `Connected · ${s.masked}`);
+    else if (v && v.auth === false) statusChip("st" + name, "bad", `Key rejected · ${s.masked}`);
+    else statusChip("st" + name, "warn", `Key saved · ${s.masked} · not checked yet`);
+    if (name === "gemini") fillModels($("gModel"), v && v.models, s.model, "Auto (prefers Gemini 4 Hydrogen)");
+    else fillModels($("cModel"), v && v.models, s.model, "Default (claude-sonnet-5-5)");
+    $(p + "Shell").classList.toggle("hidden", !s.from_shell);
+  }
+  function showOllama(o, v) {
+    v = v || o.verified;
+    $("oHost").value = o.host || "";
+    const installed = (v && v.installed) || [];
+    const all = [...new Set([...installed, ...(o.recommended || []), o.model].filter(Boolean))];
+    $("oModel").innerHTML = all.map((m) => `<option value="${esc(m)}">${esc(m)}${installed.length && !installed.includes(m) ? " (not downloaded)" : ""}</option>`).join("");
+    $("oModel").value = o.model;
+    if (!v) statusChip("stollama", "warn", "Not checked yet");
+    else if (v.ok) statusChip("stollama", "ok", `Connected · Ollama ${v.version || ""}`);
+    else if (v.auth) statusChip("stollama", "warn", "Connected · model not downloaded");
+    else statusChip("stollama", "bad", "Not reachable");
+    if (v) renderOllamaMsg(v);
+  }
+  function renderOllamaMsg(v) {
+    const m = v.model || $("oModel").value;
+    let html = esc(v.detail || "");
+    if (v.auth && !v.ok) html += `<div class="cmd"><code>ollama pull ${esc(m)}</code><button class="ghost sm" data-copy="ollama pull ${esc(m)}">Copy</button></div>`;
+    setMsg("oMsg", v.ok ? "ok" : (v.auth ? "warn" : "bad"), html);
+  }
+  async function openSettings() {
+    $("settingsModal").classList.remove("hidden");
+    ["gMsg", "cMsg", "oMsg", "dMsg"].forEach((id) => setMsg(id, "", ""));
+    let s;
+    try { s = await api("/api/settings"); } catch (e) { setMsg("gMsg", "bad", esc(e.message)); return; }
+    $("setEnv").textContent = s.env_file;
+    showCloud("gemini", s.gemini); showCloud("claude", s.claude); showOllama(s.ollama);
+    $("dEditor").value = s.default_editor;
+    // refresh the real status of what's saved (keys are checked with the provider, never shown)
+    const checks = [["ollama", null]];
+    if (s.gemini.configured && !s.gemini.verified) checks.push(["gemini", s.gemini]);
+    if (s.claude.configured && !s.claude.verified) checks.push(["claude", s.claude]);
+    for (const [name, sv] of checks) {
+      api("/api/settings/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: name }) })
+        .then((v) => { if (name === "ollama") showOllama(s.ollama, v); else showCloud(name, sv, v); })
+        .catch(() => {});
+    }
+  }
+  function closeSettings() { $("settingsModal").classList.add("hidden"); }
+  $("setClose").onclick = closeSettings;
+  $("settingsModal").addEventListener("click", (e) => { if (e.target.id === "settingsModal") closeSettings(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSettings(); });
+  $("settingsModal").addEventListener("click", (e) => {
+    const sh = e.target.closest("[data-show]");
+    if (sh) { const inp = $(sh.dataset.show); inp.type = inp.type === "password" ? "text" : "password"; sh.textContent = inp.type === "password" ? "Show" : "Hide"; }
+    const cp = e.target.closest("[data-copy]");
+    if (cp) { navigator.clipboard && navigator.clipboard.writeText(cp.dataset.copy); cp.textContent = "Copied"; }
+  });
+  async function saveSettings(body, msgId, busyBtn) {
+    const label = busyBtn.textContent;
+    busyBtn.disabled = true; busyBtn.textContent = "Checking…";
+    try {
+      const r = await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const res = Object.values(r.results || {})[0];
+      const warn = (r.warnings || []).map(esc).join("<br>");
+      setMsg(msgId, warn ? "warn" : "ok", (res ? esc(res.detail || "Saved") : "Saved") + (warn ? "<br>" + warn : ""));
+      return r;
+    } catch (e) {
+      setMsg(msgId, "bad", esc(e.message));
+      return null;
+    } finally {
+      busyBtn.disabled = false; busyBtn.textContent = label;
+      loadConfig();
+    }
+  }
+  for (const name of ["gemini", "claude"]) {
+    const p = SET[name];
+    $(p + "Save").onclick = async () => {
+      const key = $(p + "Key").value.trim();
+      const body = { [name]: { model: $(p + "Model").value } };
+      if (key) body[name].key = key;
+      const r = await saveSettings(body, p + "Msg", $(p + "Save"));
+      if (r) showCloud(name, r.settings[name], r.results[name]);
+    };
+    $(p + "Test").onclick = async () => {
+      $(p + "Test").disabled = true;
+      try {
+        const v = await api("/api/settings/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: name }) });
+        setMsg(p + "Msg", v.ok ? "ok" : "bad", esc(v.detail));
+        const s = await api("/api/settings");
+        showCloud(name, s[name], v);
+      } catch (e) { setMsg(p + "Msg", "bad", esc(e.message)); }
+      finally { $(p + "Test").disabled = false; loadConfig(); }
+    };
+    $(p + "Remove").onclick = async () => {
+      if (!confirm(`Remove the saved ${name === "gemini" ? "Gemini" : "Claude"} API key from this Mac?`)) return;
+      const r = await saveSettings({ [name]: { remove: true } }, p + "Msg", $(p + "Remove"));
+      if (r) showCloud(name, r.settings[name]);
+    };
+    $(p + "Key").addEventListener("keydown", (e) => { if (e.key === "Enter") $(p + "Save").click(); });
+  }
+  $("oSave").onclick = async () => {
+    const r = await saveSettings({ ollama: { host: $("oHost").value.trim(), model: $("oModel").value, plan_model: "" } }, "oMsg", $("oSave"));
+    if (r) { showOllama(r.settings.ollama, r.results.ollama); }
+  };
+  $("oTest").onclick = async () => {
+    $("oTest").disabled = true;
+    try {
+      const v = await api("/api/settings/verify", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "ollama", host: $("oHost").value.trim(), model: $("oModel").value }) });
+      const s = await api("/api/settings");
+      showOllama({ ...s.ollama, host: $("oHost").value.trim(), model: $("oModel").value }, v);
+    } catch (e) { setMsg("oMsg", "bad", esc(e.message)); }
+    finally { $("oTest").disabled = false; }
+  };
+  $("dSave").onclick = async () => {
+    const d = $("dEditor").value;
+    const r = await saveSettings({ default_editor: d }, "dMsg", $("dSave"));
+    if (r) {
+      setMsg("dMsg", "ok", `New reels will use: ${esc(AI_NAMES[d] || d)}`);
+      try { localStorage.setItem("reelsmith.planner", d); } catch (e) {}
+      const btn = [...$("aiSeg").children].find((b) => b.dataset.v === d);
+      if (btn) btn.click();
+    }
+  };
 
   // ---------- clips & music ----------
   function renderClips() {
@@ -204,20 +365,134 @@
       }
     }
     if (j.plan) renderPlan(j);
-    if (j.output_url && j.version !== state.lastVersion && j.status === "done") {
+    if (j.output_url && j.version !== state.lastVersion && j.status !== "running" && j.status !== "queued") {
       state.lastVersion = j.version;
-      const v = $("player");
-      v.src = j.output_url; v.controls = true; v.load(); v.play().catch(() => {});
-      $("emptyState").classList.add("hidden");
-      $("dlBtn").href = `/api/jobs/${j.id}/output?download=1`;
+      state.versions = j.versions || [];
+      showVersion(j.version, j.report);
     }
   }
+
+  // ---------- versions & "How this reel was made" ----------
+  async function showVersion(v, report) {
+    state.viewVersion = v;
+    const id = state.jobId;
+    const p = $("player");
+    p.src = `/api/jobs/${id}/output?v=${v}`; p.controls = true; p.load();
+    p.play().catch(() => {});
+    $("emptyState").classList.add("hidden");
+    $("dlBtn").href = `/api/jobs/${id}/output?download=1&v=${v}`;
+    renderVersions();
+    try { renderReport(report || await api(`/api/jobs/${id}/report?v=${v}`)); }
+    catch (e) { $("reportCard").classList.add("hidden"); }
+  }
+
+  const TRIG = { new: "New", refine: "Revision", plan: "Manual edit" };
+  function renderVersions() {
+    const vs = state.versions || [];
+    $("versions").innerHTML = vs.length > 1 ? vs.map((x) =>
+      `<button class="vchip${x.version === state.viewVersion ? " on" : ""}" data-v="${x.version}"
+        title="${esc((x.feedback ? "“" + x.feedback + "” · " : "") + (x.editor || "") + (x.model ? " · " + x.model : ""))}">
+        v${x.version} · ${esc(TRIG[x.trigger] || x.trigger)}</button>`).join("") : "";
+  }
+  $("versions").onclick = (e) => {
+    const b = e.target.closest(".vchip");
+    if (b && +b.dataset.v !== state.viewVersion) showVersion(+b.dataset.v);
+  };
+
+  const n2 = (x) => (x === null || x === undefined ? "–" : (+x).toLocaleString());
+  const kv = (rows) => `<dl class="kv">${rows.filter((r) => r && r[1] !== null && r[1] !== undefined && r[1] !== "")
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
+
+  function renderReport(r) {
+    if (!r) return;
+    $("reportCard").classList.remove("hidden");
+    const ed = r.editor || {}, s = r.settings || {}, f = r.finishing || {}, a = r.audio || {}, ch = r.changes || {};
+    // editor
+    const u = ed.usage || {};
+    let edHtml = `<div class="big">${esc(ed.label || "?")}</div>` + kv([
+      ["Model", ed.model ? `<code>${esc(ed.model)}</code>${ed.model_version ? ` <span class="sub">(${esc(ed.model_version)})</span>` : ""}` : "none (rules only)"],
+      ed.shot_log_model ? ["Shot log", `<code>${esc(ed.shot_log_model)}</code> · ${ed.shots_shown} shots (${ed.shots_logged} new, ${ed.shots_cached} cached${ed.shots_failed ? ", " + ed.shots_failed + " failed" : ""})`] : null,
+      ed.runs_on ? ["Runs on", esc(ed.runs_on)] : null,
+      (u.input_tokens || u.output_tokens) ? ["Tokens", `${n2(u.input_tokens)} in · ${n2(u.output_tokens)} out${u.thinking_tokens ? " · " + n2(u.thinking_tokens) + " thinking" : ""}`] : null,
+      ed.images_sent ? ["Images sent", `${ed.images_sent} contact sheet(s)`] : null,
+      ["Planning", ed.seconds !== undefined ? `${ed.seconds} s` : null],
+      ["Requested", esc(ed.requested || s.editor_requested || "auto")],
+      ed.based_on ? ["Based on", esc(ed.based_on)] : null,
+    ]);
+    if (ed.feedback || r.trigger?.feedback) edHtml += `<div class="quote">“${esc(ed.feedback || r.trigger.feedback)}”</div>`;
+    (ed.attempts || []).forEach((x) => { edHtml += `<div class="note warn">Tried ${esc(x.label)} first: ${esc(x.error)}</div>`; });
+    (ed.skipped || []).forEach((x) => { edHtml += `<div class="note">Skipped ${esc(x.provider)}: ${esc(x.reason)}</div>`; });
+    $("repEditor").innerHTML = edHtml;
+    // brief & settings
+    $("repBrief").innerHTML = `<div class="quote">${esc(r.brief || "(no brief)")}</div>` + kv([
+      ["Made", `${esc(r.trigger?.label || "")} · ${esc(r.created || "")}`],
+      ["Target", `${s.target_duration_s} s → ${r.render?.duration_s} s`],
+      ["Options", [s.auto_pick ? "auto-pick" : "clips in order", s.beat_sync ? "beat sync" : null, s.captions ? "captions" : null,
+        s.smart_reframe ? "smart reframe" : "centre crop", s.quality].filter(Boolean).map(esc).join(" · ")],
+      ["Footage", (r.footage || []).map((c) => `${esc(c.name)} <span class="sub">${c.duration_s.toFixed(1)} s · ${esc(c.resolution)}</span>`).join("<br>")],
+      r.concept ? ["Concept", esc(r.concept)] : null,
+    ]);
+    // look & sound
+    const m = a.music;
+    $("repLook").innerHTML = kv([
+      ["Look", `<b>${esc((f.look || "").replace(/_/g, " "))}</b> <span class="sub">${esc(f.look_description || "")}</span>`],
+      ["Finish", [`intensity ${(+f.look_intensity).toFixed(2)}`, `grain ${(+f.grain).toFixed(2)}`, `vignette ${(+f.vignette).toFixed(2)}`,
+        f.letterbox ? "letterbox" : null, f.fade_in ? "fade in" : null, f.fade_out ? "fade out" : null].filter(Boolean).join(" · ")],
+      ["Text", (f.texts || []).map((t) => `“${esc(t.content)}” <span class="sub">${esc(t.style)} ${t.from_s.toFixed(1)}–${t.to_s.toFixed(1)} s</span>`).join("<br>") || "none"],
+      ["Captions", f.captions ? `${esc(f.captions.style)} · ${f.captions.words} words` : "off"],
+      ["Music", m ? `${esc(m.name)} <span class="sub">${m.tempo_bpm} BPM · from ${(+m.starts_at_s).toFixed(1)} s · vol ${(+m.volume).toFixed(2)}${a.ducking ? " · ducked under speech" : ""}</span>` : "none"],
+      ["Original sound", `${a.original_sound_shots} shot(s)`],
+    ]);
+    // EDL
+    const rows = (r.segments || []).map((g) => {
+      const extras = [];
+      if (g.text) extras.push(`<span class="tag acc">text “${esc(g.text.content)}”</span>`);
+      if (g.captions_words) extras.push(`<span class="tag">${g.captions_words} caption words</span>`);
+      if (g.beat_adjust_s) extras.push(`<span class="tag">beat ${g.beat_adjust_s > 0 ? "+" : ""}${g.beat_adjust_s.toFixed(2)} s</span>`);
+      const tr = g.transition_in === "start" ? "start" : g.transition_in.replace(/_/g, " ") + (g.transition_s ? ` <span class="sub">${g.transition_s.toFixed(2)} s</span>` : "");
+      return `<tr class="edl-row" data-t="${g.starts_at}" title="${esc(g.reframe)}">
+        <td>${g.n}</td>
+        <td>${esc(g.clip)}<div class="sub">${esc(g.source)}${g.what ? " · " + esc(g.what) : ""}</div></td>
+        <td>${g.starts_at.toFixed(1)} s<div class="sub">+${g.on_screen_s.toFixed(1)} s</div></td>
+        <td>${g.speed}×</td><td>${esc(g.camera.replace(/_/g, " "))}</td><td>${tr}</td>
+        <td>${esc(g.sound)}</td><td>${extras.join("")}</td></tr>`;
+    }).join("");
+    $("repEdl").innerHTML = `<thead><tr><th>#</th><th>Source (clip · in–out)</th><th>At</th><th>Speed</th><th>Camera</th>
+      <th>Transition in</th><th>Sound</th><th>Extras</th></tr></thead><tbody>${rows}</tbody>`;
+    // changes
+    const items = [];
+    (ch.validation || []).forEach((w) => items.push(`<li><span class="tag">validation</span>${esc(w)}</li>`));
+    (ch.assistant_editor || []).forEach((c) => items.push(`<li><span class="tag acc">${esc(c.rule)}</span>${esc(c.change)} <span class="why">· ${esc(c.why)}</span></li>`));
+    (ch.timeline || []).forEach((t) => items.push(`<li><span class="tag">timeline</span>${esc(t)}</li>`));
+    if (ch.beat_sync) items.push(`<li><span class="tag">beat sync</span>${esc(ch.beat_sync)}</li>`);
+    const nFix = (ch.validation || []).length + (ch.assistant_editor || []).length + (ch.timeline || []).length;
+    $("repCount").textContent = nFix ? `${nFix} fix${nFix > 1 ? "es" : ""}` : "none";
+    $("repChanges").innerHTML = items.length ? `<ul class="chg">${items.join("")}</ul>`
+      : `<div class="note">None: the editor's plan was used exactly as written.</div>`;
+    // footer
+    const rd = r.render || {}, tm = r.timings_s || {};
+    $("repRender").textContent = `${rd.resolution} · ${rd.fps} fps · ${rd.codec} · ${rd.frames} frames · ${rd.file_mb || "?"} MB · `
+      + Object.entries(tm).map(([k, v]) => `${k} ${v}s`).join(", ");
+    const base = `/api/jobs/${state.jobId}`;
+    $("dlMd").href = `${base}/report.md?v=${r.version}`;
+    $("dlJson").href = `${base}/report?v=${r.version}`;
+    $("dlAi").href = `${base}/ai_plan?v=${r.version}`;
+    $("dlAi").style.display = r.files && r.files.ai_plan ? "" : "none";
+  }
+  $("repEdl").onclick = (e) => {
+    const tr = e.target.closest("tr.edl-row");
+    if (!tr) return;
+    const p = $("player");
+    p.currentTime = +tr.dataset.t + 0.05;
+    p.play().catch(() => {});
+  };
 
   function renderPlan(j) {
     const p = j.plan, tl = j.timeline || {};
     $("planCard").classList.remove("hidden");
     $("refineCard").classList.remove("hidden");
-    $("plannerName").textContent = `Edited by ${p.planner || "Reelsmith"}${j.version ? " · v" + j.version : ""}`;
+    const model = p.editor && p.editor.model && !(p.planner || "").includes(p.editor.model) ? ` · ${p.editor.model}` : "";
+    $("plannerName").textContent = `Edited by ${p.planner || "Reelsmith"}${model}${j.version ? " · latest v" + j.version : ""}`;
     $("planTitle").textContent = p.title || "Untitled";
     $("planReason").textContent = p.reasoning || "";
     const stats = [
@@ -243,7 +518,8 @@
     }).join("");
     const ta = $("planJson");
     if (document.activeElement !== ta) {
-      const clean = { ...p }; delete clean.planner; delete clean.warnings; delete clean.estimated_duration;
+      const clean = { ...p };
+      ["planner", "warnings", "estimated_duration", "editor", "craft_changes", "craft_notes"].forEach((k) => delete clean[k]);
       ta.value = JSON.stringify(clean, null, 2);
     }
   }

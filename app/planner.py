@@ -3,16 +3,23 @@
 Any AI editor can write the plan (Claude, Gemini, or a free local model on Ollama - see providers/).
 Every plan then goes through the same validation and the craft pass (craft.py). If no AI editor is
 available, or one fails, the built-in rule-based planner still delivers a reel.
+
+Provenance is recorded on the plan for the edit report:
+  plan["editor"]         who planned it: provider, exact model, tokens, time, fallbacks, skipped editors
+  plan["warnings"]       validation fixes (AI asked for something impossible -> what we did instead)
+  plan["craft_changes"]  every change the assistant-editor pass made, with the reason
+  plan["_ai_plan"]       the AI's raw plan before any fixes (saved to a file by the pipeline)
 """
 from __future__ import annotations
 
 import random
 import re
+import time
 
-from .craft import polish
+from .craft import fmt_t, polish
 from .effects import CAPTION_STYLES, LOOKS, TEXT_POSITIONS, TEXT_STYLES
 from .playbook import words_in as _words_in
-from .providers import chain
+from .providers import chain_with_skips
 from .reframe import MOTIONS
 from .transitions import TRANSITIONS
 
@@ -23,44 +30,68 @@ def _noop(*_a, **_k):
     return None
 
 
-def _finalize(raw, analysis, music, options, description, level, label):
+def _finalize(raw, analysis, music, options, description, level, editor):
     plan = sanitize_plan(raw, analysis, music, options)
-    plan = polish(plan, analysis, options, level, description)
-    pace, notes = plan.get("pace"), plan.get("craft_notes", [])
     warns = plan.get("warnings", [])
+    plan = polish(plan, analysis, options, level, description)
+    pace, notes, changes = plan.get("pace"), plan.get("craft_notes", []), plan.get("craft_changes", [])
     final = sanitize_plan(plan, analysis, music, options)
     final["pace"] = pace
-    final["planner"] = label
-    if notes:
-        final["craft_notes"] = notes
-    w = sorted(set(warns + final.get("warnings", [])))
+    final["planner"] = editor["label"]
+    final["editor"] = {**editor, "craft_level": level}
+    final["craft_notes"] = notes
+    final["craft_changes"] = changes
+    w = list(dict.fromkeys(warns + final.get("warnings", [])))
     if w:
         final["warnings"] = w
+    final["_ai_plan"] = raw
     return final
+
+
+def _run_chain(kind, call, options, log, progress, fallback_raw, level_fallback="full"):
+    requested = (options.get("planner") or "auto")
+    provs, skipped = chain_with_skips(requested)
+    attempts = []
+    for prov in provs:
+        prov.last_meta = {}
+        t0 = time.time()
+        try:
+            raw = call(prov)
+            meta = dict(getattr(prov, "last_meta", {}) or {})
+            label = prov.label + (" - revised" if kind == "refine" else "")
+            editor = {"provider": prov.name, "label": label, "requested": requested, "seconds": round(time.time() - t0, 1),
+                      "attempts": attempts, "skipped": skipped, **meta}
+            return raw, prov.polish_level, editor
+        except Exception as e:  # network / auth / model problems -> try the next editor
+            msg = f"{type(e).__name__}: {str(e)[:300]}"
+            attempts.append({"provider": prov.name, "label": prov.label, "error": msg,
+                             "seconds": round(time.time() - t0, 1)})
+            log(f"{prov.label} could not {'revise' if kind == 'refine' else 'plan'} the edit ({msg}); trying the next editor.")
+    t0 = time.time()
+    raw = fallback_raw()
+    editor = {"provider": "heuristic", "label": HEURISTIC_LABEL + (" - revised" if kind == "refine" else ""),
+              "model": None, "requested": requested, "seconds": round(time.time() - t0, 1),
+              "attempts": attempts, "skipped": skipped}
+    return raw, level_fallback, editor
 
 
 def plan_edit(analysis, music, options, description, log=print, progress=None) -> dict:
     progress = progress or _noop
-    for prov in chain(options.get("planner")):
-        try:
-            raw = prov.plan(analysis, music, options, description, log, progress)
-            return _finalize(raw, analysis, music, options, description, prov.polish_level, prov.label)
-        except Exception as e:  # network / auth / model problems -> try the next editor
-            log(f"{prov.label} could not plan the edit ({type(e).__name__}: {str(e)[:300]}); trying the next editor.")
-    raw = heuristic_raw(analysis, music, options, description)
-    return _finalize(raw, analysis, music, options, description, "full", HEURISTIC_LABEL)
+    raw, level, editor = _run_chain(
+        "plan", lambda p: p.plan(analysis, music, options, description, log, progress), options, log, progress,
+        lambda: heuristic_raw(analysis, music, options, description))
+    return _finalize(raw, analysis, music, options, description, level, editor)
 
 
 def refine_edit(prev_plan, feedback, analysis, music, options, description, log=print, progress=None) -> dict:
     progress = progress or _noop
-    for prov in chain(options.get("planner")):
-        try:
-            raw = prov.refine(prev_plan, feedback, analysis, music, options, description, log, progress)
-            return _finalize(raw, analysis, music, options, description, prov.polish_level, prov.label + " - revised")
-        except Exception as e:
-            log(f"{prov.label} could not revise the edit ({type(e).__name__}: {str(e)[:300]}); trying the next editor.")
-    raw = heuristic_raw(analysis, music, options, description + " " + feedback, seed=len(feedback) * 7 + 1)
-    return _finalize(raw, analysis, music, options, description + " " + feedback, "full", HEURISTIC_LABEL + " - revised")
+    prev = {k: v for k, v in prev_plan.items() if not k.startswith("_") and k not in ("editor", "craft_changes")}
+    raw, level, editor = _run_chain(
+        "refine", lambda p: p.refine(prev, feedback, analysis, music, options, description, log, progress),
+        options, log, progress,
+        lambda: heuristic_raw(analysis, music, options, description + " " + feedback, seed=len(feedback) * 7 + 1))
+    editor["feedback"] = feedback
+    return _finalize(raw, analysis, music, options, description + " " + feedback, level, editor)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -78,11 +109,20 @@ def _f(v, default, lo=None, hi=None):
     return x
 
 
+def _num(v):
+    try:
+        return float(v)
+    except Exception:
+        return None
+
+
 def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) -> dict:
     clips = {c["id"]: c for c in analysis["clips"]}
     shots = {s["id"]: s for s in analysis.get("all_shots", [])}
     shots.update({s["id"]: s for s in analysis["shots"]})
-    warnings = []
+    warnings: list[str] = []
+    if raw.get("look") not in LOOKS and raw.get("look"):
+        warnings.append(f"Unknown look '{raw.get('look')}' → clean")
     plan = {
         "reasoning": str(raw.get("reasoning", ""))[:1500],
         "title": str(raw.get("title", "Untitled reel"))[:80],
@@ -109,16 +149,33 @@ def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) 
             m = re.match(r"^(c\d+)", sid)
             cid = m.group(1) if m else None
         if cid not in clips:
-            warnings.append(f"dropped segment with unknown shot '{sid}'")
+            warnings.append(f"Removed a segment that pointed to an unknown shot '{sid}'")
             continue
         clip = clips[cid]
         cd = clip["duration"]
+        name = clip["name"]
+        rs, re_ = _num(s.get("start")), _num(s.get("end"))
         start = _f(s.get("start"), shot["start"] if shot else 0.0, 0, max(0, cd - 0.2))
         end = _f(s.get("end"), shot["end"] if shot else start + 2, start + 0.2, cd)
+        if rs is not None and abs(rs - start) > 0.05:
+            warnings.append(f"{name}: in-point {rs:.1f} s is outside the clip (0–{cd:.1f} s) → {start:.1f} s")
+        if re_ is not None and abs(re_ - end) > 0.05:
+            warnings.append(f"{name} @ {fmt_t(start)}: out-point {re_:.1f} s adjusted to {end:.1f} s "
+                            f"(clip ends at {cd:.1f} s / minimum 0.2 s)")
         if end - start < 0.2:
             continue
-        tr = s.get("transition_in") if s.get("transition_in") in TRANSITIONS else "cut"
+        rtr = s.get("transition_in")
+        tr = rtr if rtr in TRANSITIONS else "cut"
+        if rtr and rtr not in TRANSITIONS:
+            warnings.append(f"{name} @ {fmt_t(start)}: unknown transition '{rtr}' → cut")
         td = _f(s.get("transition_duration") or TRANSITIONS[tr][0], TRANSITIONS[tr][0], 0.0, 1.2)
+        rmo = s.get("motion")
+        if rmo and rmo not in MOTIONS:
+            warnings.append(f"{name} @ {fmt_t(start)}: unknown camera move '{rmo}' → none")
+        rsp = _num(s.get("speed"))
+        speed = round(_f(s.get("speed"), 1.0, 0.25, 4.0), 3)
+        if rsp is not None and abs(rsp - speed) > 1e-3:
+            warnings.append(f"{name} @ {fmt_t(start)}: speed {rsp:g}× is out of range → {speed:g}×")
         fx = s.get("focus_x")
         if fx is None and shot:
             fx = (shot.get("vlm") or {}).get("subject_x", shot.get("focus_x"))
@@ -133,8 +190,8 @@ def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) 
             "clip_id": cid,
             "start": round(start, 3),
             "end": round(end, 3),
-            "speed": round(_f(s.get("speed"), 1.0, 0.25, 4.0), 3),
-            "motion": s.get("motion") if s.get("motion") in MOTIONS else "none",
+            "speed": speed,
+            "motion": rmo if rmo in MOTIONS else "none",
             "transition_in": tr,
             "transition_duration": round(td, 3),
             "focus_x": round(_f(fx, 0.5, 0, 1), 3),
@@ -157,6 +214,8 @@ def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) 
         t -= sum(s["transition_duration"] for s in segs[1:] if s["transition_in"] != "cut")
         return t
 
+    dropped = 0
+    before = total()
     while len(plan["segments"]) > 1 and total() > target * 1.12:
         last = plan["segments"][-1]
         over = total() - target
@@ -165,12 +224,19 @@ def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) 
             last["end"] = round(last["start"] + (ld - over) * last["speed"], 3)
             break
         plan["segments"].pop()
-        warnings.append("trimmed trailing segments to fit the target duration")
+        dropped += 1
+    if total() < before - 0.05:
+        warnings.append(f"Plan ran {before:.1f} s for a {target:.0f} s target: "
+                        + (f"removed {dropped} trailing shot(s) and " if dropped else "")
+                        + f"trimmed to {total():.1f} s")
     if music:
-        plan["music_start"] = round(min(plan["music_start"], max(0.0, music["duration"] - total() - 0.3)), 3)
+        ms = plan["music_start"]
+        plan["music_start"] = round(min(ms, max(0.0, music["duration"] - total() - 0.3)), 3)
+        if abs(plan["music_start"] - ms) > 0.05:
+            warnings.append(f"Music start moved {ms:.1f} s → {plan['music_start']:.1f} s so the track doesn't run out")
     plan["estimated_duration"] = round(total(), 2)
     if warnings:
-        plan["warnings"] = sorted(set(warnings))
+        plan["warnings"] = list(dict.fromkeys(warnings))
     return plan
 
 
@@ -195,7 +261,7 @@ _SLOW = ("calm", "slow", "chill", "dreamy", "emotional", "peaceful", "wedding", 
 def heuristic_plan(analysis, music, options, description, seed=0) -> dict:
     """Validated + polished offline plan (kept for scripts/tests)."""
     return _finalize(heuristic_raw(analysis, music, options, description, seed), analysis, music, options,
-                     description, "full", HEURISTIC_LABEL)
+                     description, "full", {"provider": "heuristic", "label": HEURISTIC_LABEL, "model": None})
 
 
 def heuristic_raw(analysis, music, options, description, seed=0) -> dict:

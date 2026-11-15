@@ -4,6 +4,9 @@ level="light" (Claude / Gemini): only safety fixes - word-safe speech cuts, no d
 duration fit.
 level="full" (local models / heuristic): also pacing bounds, transition restraint, motion variety,
 strongest hook first and a resolved ending.
+
+Every change is recorded in plan["craft_changes"] as {"rule", "change", "why"} so the edit report
+can show exactly what was altered after the AI wrote its plan.
 """
 from __future__ import annotations
 
@@ -28,12 +31,33 @@ def guess_pace(text: str) -> str:
     return "medium"
 
 
+def fmt_t(t: float) -> str:
+    m, s = divmod(max(0.0, float(t)), 60)
+    return f"{int(m)}:{s:04.1f}"
+
+
 def _out(s):
     return (s["end"] - s["start"]) / s["speed"]
 
 
 def _overlap(a, b, c, d):
     return max(0.0, min(b, d) - max(a, c))
+
+
+def _free(a, b, used):
+    """Sub-intervals of [a, b] not covered by any used (x, y) interval."""
+    out, cur = [], a
+    for x, y in sorted(used):
+        if y <= cur or x >= b:
+            continue
+        if x > cur:
+            out.append((cur, min(x, b)))
+        cur = max(cur, y)
+        if cur >= b:
+            break
+    if cur < b:
+        out.append((cur, b))
+    return [(x, y) for x, y in out if y - x > 0.05]
 
 
 def _hook_value(s, shots):
@@ -44,7 +68,26 @@ def _hook_value(s, shots):
     return sh.get("score", 0.5)
 
 
-def _variety(segs, notes):
+def total_duration(segs):
+    t = sum(_out(s) for s in segs)
+    t -= sum(s.get("transition_duration", 0) for s in segs[1:] if s.get("transition_in") != "cut")
+    return t
+
+
+class _Log:
+    def __init__(self, clips):
+        self.items: list[dict] = []
+        self.clips = clips
+
+    def desc(self, s) -> str:
+        name = self.clips.get(s["clip_id"], {}).get("name", s["clip_id"])
+        return f"{name} @ {fmt_t(s['start'])}"
+
+    def add(self, rule: str, change: str, why: str):
+        self.items.append({"rule": rule, "change": change, "why": why})
+
+
+def _variety(segs, log: _Log):
     """Transition restraint (<= ~30% stylised, no identical ones back-to-back) and camera-move variety."""
     segs[0]["transition_in"] = "cut"
     styl = [i for i, s in enumerate(segs) if i > 0 and s["transition_in"] != "cut"]
@@ -54,11 +97,14 @@ def _variety(segs, notes):
         keep_idx = {styl[int(k * step)] for k in range(allowed)}
         for i in styl:
             if i not in keep_idx:
+                log.add("transition restraint", f"{log.desc(segs[i])}: {segs[i]['transition_in']} → cut",
+                        f"{len(styl)} of {len(segs) - 1} edits were stylised; keeping {allowed} so they land harder")
                 segs[i]["transition_in"] = "cut"
-        notes.append("reduced stylised transitions so they land harder")
     prev = None
     for s in segs[1:]:
         if s["transition_in"] != "cut" and s["transition_in"] == prev:
+            log.add("transition restraint", f"{log.desc(s)}: {s['transition_in']} → cut",
+                    "same stylised transition twice in a row")
             s["transition_in"] = "cut"
         prev = s["transition_in"] if s["transition_in"] != "cut" else prev
     for s in segs:
@@ -71,21 +117,17 @@ def _variety(segs, notes):
             nxt = segs[i + 1]["motion"] if i + 1 < len(segs) else None
             if alt == nxt:
                 alt = next(a for a in ("drift_right", "pull_out", "drift_left", "push_in") if a not in (m, nxt))
+            log.add("camera variety", f"{log.desc(segs[i])}: camera {m} → {alt}",
+                    "same camera move as the previous shot")
             segs[i]["motion"] = alt
 
 
-def total_duration(segs):
-    t = sum(_out(s) for s in segs)
-    t -= sum(s.get("transition_duration", 0) for s in segs[1:] if s.get("transition_in") != "cut")
-    return t
-
-
 def polish(plan: dict, analysis: dict, options: dict, level: str = "light", description: str = "") -> dict:
-    notes: list[str] = []
     segs = [dict(s) for s in plan.get("segments", [])]
     if not segs:
         return plan
     clips = {c["id"]: c for c in analysis["clips"]}
+    log = _Log(clips)
     shots = {s["id"]: s for s in analysis.get("all_shots", [])}
     shots.update({s["id"]: s for s in analysis.get("shots", [])})
     trs = analysis.get("transcripts", {})
@@ -108,14 +150,20 @@ def polish(plan: dict, analysis: dict, options: dict, level: str = "light", desc
         if not ws:
             continue
         if abs(s["speed"] - 1.0) > 1e-3:
+            log.add("speech", f"{log.desc(s)}: speed {s['speed']:g}× → 1×", "this shot keeps its speech")
             s["speed"] = 1.0
-            notes.append("speech segments play at normal speed")
         cd = clips[s["clip_id"]]["duration"]
         for w in ws:
             if w["start"] < s["start"] < w["end"]:
-                s["start"] = round(max(0.0, w["start"] - 0.05), 3)
+                new = round(max(0.0, w["start"] - 0.05), 3)
+                log.add("word-safe cut", f"{log.desc(s)}: in-point {fmt_t(s['start'])} → {fmt_t(new)}",
+                        f"the cut fell in the middle of the word \"{w['word']}\"")
+                s["start"] = new
             if w["start"] < s["end"] < w["end"]:
-                s["end"] = round(min(cd, w["end"] + 0.08), 3)
+                new = round(min(cd, w["end"] + 0.08), 3)
+                log.add("word-safe cut", f"{log.desc(s)}: out-point {fmt_t(s['end'])} → {fmt_t(new)}",
+                        f"the cut fell in the middle of the word \"{w['word']}\"")
+                s["end"] = new
 
     # 2. no duplicate moments (a ramp continuing the previous segment is fine: it doesn't overlap)
     used: dict[str, list] = {}
@@ -123,21 +171,30 @@ def polish(plan: dict, analysis: dict, options: dict, level: str = "light", desc
     for s in segs:
         L = s["end"] - s["start"]
         prior = used.setdefault(s["clip_id"], [])
-        ov = max((_overlap(s["start"], s["end"], a, b) for a, b in prior), default=0.0)
-        if L > 0 and ov / L > 0.5:
+        ov = sum(_overlap(s["start"], s["end"], a, b) for a, b in prior)
+        if L > 0 and ov > max(0.25, 0.15 * L):
             lo, hi = shot_bounds(s)
-            moved = False
+            old = log.desc(s)
+            fixed = False
             t = lo
-            while t + L <= hi + 1e-6:
-                if max((_overlap(t, t + L, a, b) for a, b in prior), default=0.0) <= 0.2 * L:
+            while t + L <= hi + 1e-6:  # 1) same length, fresh part of the same shot
+                if sum(_overlap(t, t + L, a, b) for a, b in prior) <= 0.05:
                     s["start"], s["end"] = round(t, 3), round(t + L, 3)
-                    moved = True
+                    log.add("no repeats", f"{old} → {fmt_t(s['start'])}", "that moment was already in the reel")
+                    fixed = True
                     break
                 t += 0.25
-            if moved:
-                notes.append("moved a repeated moment to a fresh part of its shot")
-            elif full and len(segs) > 2:
-                notes.append("dropped a segment that repeated an earlier moment")
+            if not fixed:  # 2) keep only the part that hasn't been used yet
+                free = _free(s["start"], s["end"], prior)
+                if free:
+                    a, b = max(free, key=lambda x: x[1] - x[0])
+                    if b - a >= max(0.6, 0.5 * L):
+                        s["start"], s["end"] = round(a, 3), round(b, 3)
+                        log.add("no repeats", f"{old}: trimmed to {fmt_t(a)}–{fmt_t(b)}",
+                                "part of it was already in the reel")
+                        fixed = True
+            if not fixed and full and len(segs) > 2:
+                log.add("no repeats", f"removed a second use of {old}", "that moment was already in the reel")
                 continue
         prior.append((s["start"], s["end"]))
         kept.append(s)
@@ -151,9 +208,14 @@ def polish(plan: dict, analysis: dict, options: dict, level: str = "light", desc
             d = _out(s)
             if d > cap * 1.15:
                 s["end"] = round(s["start"] + cap * s["speed"], 3)
+                log.add("pacing", f"{log.desc(s)}: {d:.1f} s → {cap:.1f} s on screen",
+                        f"{pace} pace: shots up to ~{cap:.1f} s")
             elif d < lo_d * 0.8:
                 _, hi = shot_bounds(s)
                 s["end"] = round(min(hi, s["start"] + lo_d * s["speed"]), 3)
+                if abs(_out(s) - d) > 0.05:
+                    log.add("pacing", f"{log.desc(s)}: {d:.1f} s → {_out(s):.1f} s on screen",
+                            f"{pace} pace: shots at least ~{lo_d:.1f} s")
 
         # 4. hook: strongest image first - unless the user said how to open, or wants clips in order
         told_opening = re.search(r"\b(open|start|begin)\w*\s+(on|with)\b|\bfirst shot\b", (description or "").lower())
@@ -164,25 +226,42 @@ def polish(plan: dict, analysis: dict, options: dict, level: str = "light", desc
                 old_first = segs[0]
                 first = segs.pop(best)
                 first["transition_in"] = "cut"
-                # an opening title belongs to the opening shot
+                log.add("hook first", f"moved {log.desc(first)} to the opening (was shot {best + 1})",
+                        f"strongest opening image (hook {vals[best]:.2f} vs {vals[0]:.2f})")
                 if old_first.get("text") and not first.get("text"):
                     first["text"], old_first["text"] = old_first["text"], None
+                    log.add("hook first", f"moved the title \"{first['text']['content']}\" to the new opening shot",
+                            "an opening title belongs on the first shot")
                 segs.insert(0, first)
-                notes.append("moved the strongest shot to the opening hook")
         segs[0]["transition_in"] = "cut"
 
     # 5. duration fit: stretch segments inside their shots, then (full) add unused strong shots
     tot = total_duration(segs)
     if tot < target * 0.88:
+        before = tot
+        n_str = 0
         for s in segs:
             if s.get("keep_audio"):
                 continue
             _, hi = shot_bounds(s)
+            # never stretch into footage another segment already uses
+            later = [o["start"] for o in segs if o is not s and o["clip_id"] == s["clip_id"]
+                     and o["start"] >= s["start"] - 1e-3]
+            if later:
+                hi = min(hi, min(later))
+            if hi <= s["end"]:
+                continue
             want = _out(s) * min(1.8, target / max(tot, 0.1))
             if full:
                 want = min(want, PACE_BOUNDS[pace][1] * 1.2)
+            old_d = _out(s)
             s["end"] = round(min(hi, s["start"] + want * s["speed"]), 3)
+            if _out(s) - old_d > 0.05:
+                n_str += 1
         tot = total_duration(segs)
+        if n_str:
+            log.add("length fit", f"lengthened {n_str} shot(s) within their takes: {before:.1f} s → {tot:.1f} s",
+                    f"the plan was shorter than the {target:.0f} s target")
         if full and tot < target * 0.88:
             used_ids = {(s["clip_id"], round(s["start"], 1)) for s in segs}
             pool = sorted(analysis.get("shots", []), key=lambda sh: _hook_value({"shot_id": sh["id"]}, shots),
@@ -199,27 +278,35 @@ def polish(plan: dict, analysis: dict, options: dict, level: str = "light", desc
                     continue
                 new = {"shot_id": sh["id"], "clip_id": sh["clip_id"], "start": round(st, 3), "end": round(st + ln, 3),
                        "speed": 1.0, "motion": motions[len(segs) % 4], "transition_in": "cut",
-                       "transition_duration": 0.0, "focus_x": (sh.get("vlm") or {}).get("subject_x", sh.get("focus_x") or 0.5),
+                       "transition_duration": 0.0,
+                       "focus_x": (sh.get("vlm") or {}).get("subject_x", sh.get("focus_x") or 0.5),
                        "keep_audio": False, "text": None}
                 segs.insert(max(1, len(segs) - 1), new)
                 prior.append((st, st + ln))
                 tot += ln
-            notes.append("added strong unused shots to reach the target length")
+                log.add("length fit", f"added {log.desc(new)} ({ln:.1f} s, unused strong shot)",
+                        f"the plan was still shorter than the {target:.0f} s target")
 
     if full and segs:
         # 6. resolved ending
         last = segs[-1]
         if last["motion"] == "punch_in":
             last["motion"] = "push_in"
+            log.add("ending", f"{log.desc(last)}: camera punch_in → push_in", "end on a calm, resolved move")
         if _out(last) < 1.2:
             _, hi = shot_bounds(last)
+            d = _out(last)
             last["end"] = round(min(hi, last["start"] + 1.2 * last["speed"]), 3)
+            if _out(last) - d > 0.05:
+                log.add("ending", f"{log.desc(last)}: {d:.1f} s → {_out(last):.1f} s", "let the last image breathe")
+        if not plan.get("fade_out", True):
+            log.add("ending", "added a fade-out", "end the reel cleanly")
         plan["fade_out"] = True
         # 7. variety (last, so it also covers reordered / added segments)
-        _variety(segs, notes)
+        _variety(segs, log)
 
     plan["segments"] = segs
     plan["pace"] = pace
-    if notes:
-        plan["craft_notes"] = sorted(set(notes))
+    plan["craft_changes"] = log.items
+    plan["craft_notes"] = sorted({c["rule"] for c in log.items})
     return plan

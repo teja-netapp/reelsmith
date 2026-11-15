@@ -8,9 +8,9 @@ from __future__ import annotations
 import copy
 import json
 
-from ..config import GEMINI_MODEL, gemini_key
+from .. import config as C
 from ..playbook import PLAN_SCHEMA, SYSTEM_PROMPT_FULL, build_context_text, refine_suffix, sheet_images_b64
-from .base import Provider, ProviderError, http_json, parse_json_loose
+from .base import Provider, ProviderError, http_json, parse_json_loose, rejected
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 # auto-detect order when GEMINI_MODEL is not set (first one your key can use wins)
@@ -42,20 +42,22 @@ class GeminiProvider(Provider):
 
     @property
     def label(self):
-        return f"Gemini ({_resolved_model or GEMINI_MODEL or 'auto'})"
+        return f"Gemini ({_resolved_model or C.GEMINI_MODEL or 'auto'})"
 
     def status(self):
-        if not gemini_key():
+        if not C.gemini_key():
             return {"available": False, "detail": "no GEMINI_API_KEY"}
-        return {"available": True, "detail": GEMINI_MODEL or _resolved_model or "auto (prefers gemini-4-hydrogen)"}
+        if rejected("gemini", C.gemini_key()):
+            return {"available": False, "detail": "API key was rejected by Google - update it in Settings"}
+        return {"available": True, "detail": C.GEMINI_MODEL or _resolved_model or "auto (prefers gemini-4-hydrogen)"}
 
     def _headers(self):
-        return {"x-goog-api-key": gemini_key()}
+        return {"x-goog-api-key": C.gemini_key()}
 
     def model(self, log=print) -> str:
         global _resolved_model
-        if GEMINI_MODEL:
-            return GEMINI_MODEL
+        if C.GEMINI_MODEL:
+            return C.GEMINI_MODEL
         if _resolved_model:
             return _resolved_model
         try:
@@ -94,9 +96,11 @@ class GeminiProvider(Provider):
              "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 24000}},
         ]
         last = None
+        used_format = None
         for i, b in enumerate(attempts):
             try:
                 res = http_json(url, b, headers=self._headers(), timeout=300)
+                used_format = ["JSON schema", "OpenAPI schema", "schema in prompt"][i]
                 break
             except ProviderError as e:
                 last = e
@@ -118,6 +122,14 @@ class GeminiProvider(Provider):
         if usage:
             log(f"Gemini {model}: {usage.get('promptTokenCount', '?')} in / "
                 f"{usage.get('candidatesTokenCount', '?')} out tokens")
+        self.last_meta = {
+            "model": model,
+            "model_version": res.get("modelVersion"),
+            "usage": {"input_tokens": usage.get("promptTokenCount"), "output_tokens": usage.get("candidatesTokenCount"),
+                      "thinking_tokens": usage.get("thoughtsTokenCount")} if usage else None,
+            "images_sent": len(parts) - 1,
+            "output_format": used_format,
+        }
         return parse_json_loose(out)
 
     def plan(self, analysis, music, options, description, log, progress):

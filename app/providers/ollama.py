@@ -22,7 +22,7 @@ from PIL import Image
 
 from ..analyze import select_shots
 from ..audio import CACHE
-from ..config import LOCAL_MAX_SHOTS, OLLAMA_HOST, OLLAMA_MODEL, OLLAMA_NUM_CTX, OLLAMA_PLAN_MODEL
+from .. import config as C
 from ..effects import CAPTION_STYLES, LOOKS, TEXT_STYLES
 from ..playbook import (FORMAT_NOTE, PRINCIPLES, ROLE, clip_lines, music_lines, settings_lines,
                         transcript_lines, words_in)
@@ -67,7 +67,7 @@ PACE_LEN = {"fast": (0.6, 1.4), "medium": (1.2, 2.6), "slow": (2.2, 4.2)}
 
 
 def _host() -> str:
-    h = OLLAMA_HOST
+    h = C.OLLAMA_HOST
     if not h.startswith("http"):
         h = "http://" + h
     return h.rstrip("/").replace("0.0.0.0", "127.0.0.1")
@@ -128,7 +128,7 @@ class OllamaProvider(Provider):
 
     @property
     def label(self):
-        return f"Local AI ({OLLAMA_PLAN_MODEL})"
+        return f"Local AI ({C.OLLAMA_PLAN_MODEL})"
 
     # -- plumbing ---------------------------------------------------------------------------
     def installed_models(self) -> list[str]:
@@ -144,13 +144,13 @@ class OllamaProvider(Provider):
             models = self.installed_models()
         except Exception:
             return {"available": False, "detail": "Ollama is not running"}
-        missing = [m for m in {OLLAMA_MODEL, OLLAMA_PLAN_MODEL} if not self._has(models, m)]
+        missing = [m for m in {C.OLLAMA_MODEL, C.OLLAMA_PLAN_MODEL} if not self._has(models, m)]
         if missing:
             return {"available": False, "detail": f"run: ollama pull {missing[0]}"}
-        return {"available": True, "detail": OLLAMA_PLAN_MODEL}
+        return {"available": True, "detail": C.OLLAMA_PLAN_MODEL}
 
     def chat(self, model: str, system: str, user: str, schema: dict, images=None, temperature=0.4,
-             num_ctx=OLLAMA_NUM_CTX, timeout=900) -> dict:
+             num_ctx=None, timeout=900) -> dict:
         msg = {"role": "user", "content": user}
         if images:
             msg["images"] = images
@@ -160,42 +160,64 @@ class OllamaProvider(Provider):
             "format": schema,
             "stream": False,
             "keep_alive": "10m",
-            "options": {"temperature": temperature, "num_ctx": num_ctx},
+            "options": {"temperature": temperature, "num_ctx": num_ctx or C.OLLAMA_NUM_CTX},
         }
         res = http_json(f"{_host()}/api/chat", body, timeout=timeout, retries=1)
         if res.get("error"):
             raise ProviderError(res["error"])
+        self._last_raw = res
         return parse_json_loose(res.get("message", {}).get("content", ""))
 
     # -- 1. logging ---------------------------------------------------------------------------
-    def log_shots(self, shots: list[dict], log, progress) -> None:
+    def log_shots(self, shots: list[dict], log, progress) -> dict:
         n = len(shots)
+        stats = {"logged": 0, "cached": 0, "failed": 0}
         for i, s in enumerate(shots):
             if s.get("vlm"):
+                stats["cached"] += 1
                 continue
             try:
                 raw = open(s["thumb"], "rb").read()
             except Exception:
+                stats["failed"] += 1
                 continue
-            key = hashlib.sha1(raw + OLLAMA_MODEL.encode()).hexdigest()[:20]
+            key = hashlib.sha1(raw + C.OLLAMA_MODEL.encode()).hexdigest()[:20]
             cpath = CACHE / f"vlm_{key}.json"
             if cpath.exists():
                 s["vlm"] = json.loads(cpath.read_text())
+                stats["cached"] += 1
                 continue
             progress(0.05 + 0.45 * i / max(1, n), f"Local AI is logging shot {i + 1}/{n} ({s['id']})")
             try:
-                d = self.chat(OLLAMA_MODEL, "You are a precise footage logger. Reply only with JSON.", LOG_PROMPT,
+                d = self.chat(C.OLLAMA_MODEL, "You are a precise footage logger. Reply only with JSON.", LOG_PROMPT,
                               SHOT_SCHEMA, images=[_img_b64(s["thumb"])], temperature=0.1, num_ctx=4096,
                               timeout=300)
             except Exception as e:
                 log(f"shot logging failed for {s['id']}: {e}")
+                stats["failed"] += 1
                 continue
             d["subject_x"] = float(min(1.0, max(0.0, float(d.get("subject_x", 0.5) or 0.5))))
             d["quality"] = int(min(10, max(1, int(d.get("quality", 5) or 5))))
             d["hook"] = int(min(10, max(1, int(d.get("hook", 5) or 5))))
             d["description"] = str(d.get("description", ""))[:160]
+            d["model"] = C.OLLAMA_MODEL
             s["vlm"] = d
             cpath.write_text(json.dumps(d))
+            stats["logged"] += 1
+        return stats
+
+    def _meta(self, stats: dict, n_shots: int) -> dict:
+        r = getattr(self, "_last_raw", {}) or {}
+        return {
+            "model": C.OLLAMA_PLAN_MODEL,
+            "shot_log_model": C.OLLAMA_MODEL,
+            "shots_shown": n_shots,
+            "shots_logged": stats.get("logged", 0),
+            "shots_cached": stats.get("cached", 0),
+            "shots_failed": stats.get("failed", 0),
+            "usage": {"input_tokens": r.get("prompt_eval_count"), "output_tokens": r.get("eval_count")},
+            "runs_on": "this Mac (Ollama)",
+        }
 
     # -- 2. editing ---------------------------------------------------------------------------
     def _shot_log_lines(self, shots, analysis) -> list[str]:
@@ -238,7 +260,7 @@ class OllamaProvider(Provider):
 
     def _local_shots(self, analysis, extra_ids=()):
         order = [c["id"] for c in analysis["clips"]]
-        shots = select_shots(analysis["shots"], LOCAL_MAX_SHOTS, order)
+        shots = select_shots(analysis["shots"], C.LOCAL_MAX_SHOTS, order)
         have = {s["id"] for s in shots}
         by_id = _shot_index(analysis)
         for sid in extra_ids:
@@ -249,27 +271,29 @@ class OllamaProvider(Provider):
 
     def plan(self, analysis, music, options, description, log, progress):
         shots = self._local_shots(analysis)
-        self.log_shots(shots, log, progress)
+        stats = self.log_shots(shots, log, progress)
         pace = _guess_pace(description)
-        progress(0.55, f"Local AI ({OLLAMA_PLAN_MODEL}) is writing the edit - about a minute on a laptop")
-        cp = self.chat(OLLAMA_PLAN_MODEL, self._system(), self._prompt(shots, analysis, music, options, description,
+        progress(0.55, f"Local AI ({C.OLLAMA_PLAN_MODEL}) is writing the edit - about a minute on a laptop")
+        cp = self.chat(C.OLLAMA_PLAN_MODEL, self._system(), self._prompt(shots, analysis, music, options, description,
                                                                           pace),
                        compact_schema([s["id"] for s in shots]), temperature=0.5)
+        self.last_meta = self._meta(stats, len(shots))
         return compact_to_raw(cp, analysis, music)
 
     def refine(self, prev_plan, feedback, analysis, music, options, description, log, progress):
         prev_ids = [s.get("shot_id") for s in prev_plan.get("segments", [])]
         shots = self._local_shots(analysis, prev_ids)
-        self.log_shots(shots, log, progress)
+        stats = self.log_shots(shots, log, progress)
         pace = _guess_pace(description + " " + feedback)
         current = full_to_compact(prev_plan, analysis)
         text = (self._prompt(shots, analysis, music, options, description, pace) +
                 "\n\n# Current edit (already rendered)\n" + json.dumps(current, indent=1) +
                 "\n\n# Revision request from the user\n" + feedback.strip() +
                 "\n\nApply the revision: keep what works, change what was asked, and return the COMPLETE new edit.")
-        progress(0.55, f"Local AI ({OLLAMA_PLAN_MODEL}) is revising the edit")
-        cp = self.chat(OLLAMA_PLAN_MODEL, self._system(), text, compact_schema([s["id"] for s in shots]),
+        progress(0.55, f"Local AI ({C.OLLAMA_PLAN_MODEL}) is revising the edit")
+        cp = self.chat(C.OLLAMA_PLAN_MODEL, self._system(), text, compact_schema([s["id"] for s in shots]),
                        temperature=0.5)
+        self.last_meta = self._meta(stats, len(shots))
         return compact_to_raw(cp, analysis, music)
 
 

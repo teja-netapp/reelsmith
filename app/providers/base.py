@@ -12,6 +12,22 @@ class ProviderError(RuntimeError):
     pass
 
 
+# Last key/connection check per provider (from the Settings panel), keyed to the exact key checked
+VERIFIED: dict[str, dict] = {}
+
+
+def key_fp(secret: str) -> str:
+    import hashlib
+
+    return hashlib.sha256((secret or "").encode()).hexdigest()[:12]
+
+
+def rejected(provider: str, secret: str) -> bool:
+    """True if this exact key was verified and the provider said it's invalid."""
+    v = VERIFIED.get(provider)
+    return bool(v and v.get("key_fp") == key_fp(secret) and v.get("auth") is False)
+
+
 def http_json(url: str, payload: dict | None = None, headers: dict | None = None, timeout: float = 300,
               retries: int = 2, method: str | None = None) -> dict:
     """POST (or GET when payload is None) JSON with simple retry on 429/5xx."""
@@ -61,6 +77,8 @@ class Provider:
     name = "base"
     label = "base"
     polish_level = "light"   # how much the craft pass may correct this provider's plans
+    # filled by plan()/refine() for the edit report: model, usage (tokens), extra details
+    last_meta: dict = {}
 
     def status(self) -> dict:  # {"available": bool, "detail": str}
         raise NotImplementedError
