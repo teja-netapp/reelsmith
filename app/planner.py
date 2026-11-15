@@ -17,7 +17,9 @@ import re
 import time
 
 from .craft import fmt_t, polish
-from .effects import CAPTION_STYLES, LOOKS, TEXT_POSITIONS, TEXT_STYLES
+from .learning import get_learner
+from .effects import CAPTION_STYLES, TEXT_POSITIONS, TEXT_STYLES
+from .grading import look_names, look_texture
 from .playbook import words_in as _words_in
 from .providers import chain_with_skips
 from .reframe import MOTIONS
@@ -33,9 +35,21 @@ def _noop(*_a, **_k):
 def _finalize(raw, analysis, music, options, description, level, editor):
     plan = sanitize_plan(raw, analysis, music, options)
     warns = plan.get("warnings", [])
-    plan = polish(plan, analysis, options, level, description)
+    learner = get_learner()
+    taste = learner.profile(description)["params"] if learner.enabled else {}
+    plan = polish(plan, analysis, options, level, description, taste)
     pace, notes, changes = plan.get("pace"), plan.get("craft_notes", []), plan.get("craft_changes", [])
+    learning = None
+    if learner.enabled:
+        try:  # reward-guided variant search (your learned taste)
+            plan = learner.improve(plan, analysis, options, description, level, polish, sanitize_plan, music)
+            learning = plan.get("learning")
+            changes = changes + [c for c in plan.get("craft_changes", []) if c not in changes]
+        except Exception as e:  # never lose an edit because of the learner
+            learning = {"error": f"{type(e).__name__}: {e}"}
     final = sanitize_plan(plan, analysis, music, options)
+    if learning:
+        final["learning"] = learning
     final["pace"] = pace
     final["planner"] = editor["label"]
     final["editor"] = {**editor, "craft_level": level}
@@ -121,6 +135,7 @@ def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) 
     shots = {s["id"]: s for s in analysis.get("all_shots", [])}
     shots.update({s["id"]: s for s in analysis["shots"]})
     warnings: list[str] = []
+    LOOKS = look_names()
     if raw.get("look") not in LOOKS and raw.get("look"):
         warnings.append(f"Unknown look '{raw.get('look')}' → clean")
     plan = {
@@ -131,6 +146,8 @@ def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) 
         "grain": _f(raw.get("grain"), 0.15, 0, 1),
         "vignette": _f(raw.get("vignette"), 0.3, 0, 1),
         "letterbox": bool(raw.get("letterbox", False)),
+        "halation": _f(raw.get("halation"), look_texture(raw.get("look") if raw.get("look") in LOOKS else "clean")["halation"], 0, 1),
+        "bloom": _f(raw.get("bloom"), look_texture(raw.get("look") if raw.get("look") in LOOKS else "clean")["bloom"], 0, 1),
         "fade_in": bool(raw.get("fade_in", True)),
         "fade_out": bool(raw.get("fade_out", True)),
         "music_start": _f(raw.get("music_start"), music["suggested_start"] if music else 0, 0),
@@ -244,7 +261,17 @@ def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) 
 # Heuristic planner (offline fallback)
 # ----------------------------------------------------------------------------------------------
 _LOOK_WORDS = [
+    (("sepia",), "sepia"),
     (("black and white", "b&w", "noir", "monochrome"), "noir"),
+    (("bleach",), "bleach_bypass"),
+    (("kodak", "film print", "2383"), "kodak_2383"),
+    (("fuji", "eterna"), "fuji_eterna"),
+    (("pastel", "matte"), "matte_pastel"),
+    (("airy", "high key", "high-key", "bright and"), "high_key"),
+    (("desert", "dune", "heat"), "desert_heat"),
+    (("forest", "jungle", "emerald"), "emerald_moody"),
+    (("cross process", "cross-process"), "cross_process"),
+    (("blue hour",), "cinematic_cool"),
     (("vintage", "retro", "80s", "70s", "90s", "nostalg", "vhs"), "vintage"),
     (("teal", "blockbuster", "hollywood", "epic", "action"), "teal_orange"),
     (("golden", "sunset", "sunrise", "warm"), "golden_hour"),

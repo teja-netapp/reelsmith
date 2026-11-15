@@ -68,6 +68,8 @@ def _snap_to_beats(segs, music, music_start, fps):
 
 def build_timeline(plan: dict, analysis: dict, music: dict | None, options: dict, fps: int = 30) -> dict:
     clips = {c["id"]: c for c in analysis["clips"]}
+    shot_idx = {s["id"]: s for s in analysis.get("all_shots", [])}
+    shot_idx.update({s["id"]: s for s in analysis.get("shots", [])})
     segs = []
     for s in plan["segments"]:
         c = clips[s["clip_id"]]
@@ -80,6 +82,7 @@ def build_timeline(plan: dict, analysis: dict, music: dict | None, options: dict
             "n_frames": n, "m_in": m, "transition_in": tr, "motion": s["motion"],
             "focus_x": s.get("focus_x", 0.5), "keep_audio": s.get("keep_audio", False), "text": s.get("text"),
             "shot_id": s.get("shot_id"),
+            "color": (shot_idx.get(s.get("shot_id")) or {}).get("color"),
         })
     _clamp_transitions(segs)
     snapped = 0

@@ -30,6 +30,38 @@ The app only answers requests to `localhost` and refuses changes coming from oth
 
 All editors follow the same **editing playbook** (`app/playbook.py`): hook in the first second, pacing that matches the mood, rare and well-chosen transitions, story flow, speech-aware audio, beat sync. Every plan then goes through the **craft pass** (`app/craft.py`), which acts as an assistant editor and fixes rule breaks before rendering.
 
+## It learns your taste (and gets better with every edit)
+
+The local AI's weights don't change. Retraining an 8B model on a laptop is impractical, and a few dozen edits wouldn't be enough data. What learns is a **taste model** wrapped around it. That's the same reward-model idea that powers RLHF, applied at the scale of one person's preferences:
+
+| You do this | It learns |
+|---|---|
+| Rate a version ★–★★★★★ | That edit's style is better or worse. It also compares it with your other versions of the same reel |
+| Download a version | A weaker "this one" signal |
+| Pick a grade in **Look Lab** | Which look families you like, for this kind of reel |
+| Ask for a revision ("faster, warmer, no glitch") | Your request is parsed into concrete preferences straight away |
+
+What it does with that on the next reel:
+
+1. **House style in the prompt:** the local AI is told your learned preferences and shown your best-rated past edits as examples.
+2. **Assistant editor:** your learned shot length, transition budget and dislikes (e.g. no glitch, no slow motion) are enforced.
+3. **Variant search:** after the AI writes its plan, about 15–35 variants (pace, transitions, look, grain, letterbox, slow motion) are scored by the taste model, and the best one is rendered. While it's still unsure, it stays close to the AI's plan. Now and then it tries a near-best variant or a look you haven't seen, so it keeps discovering what you like.
+
+You can see all of it in **⚙ Settings → Learning**: what it learned, how sure it is, and your rating trend (first 10 vs last 10). The same panel has controls to pause, reset, or export the dataset as JSONL, which you could use for a real fine-tune later. Each reel's report shows what the taste model changed and why.
+
+`python tests/simulate_learning.py` runs a simulated user with a hidden taste through 40 reels. Their ratings rise over the rounds, and the learned house style matches the hidden taste.
+
+> **Honest expectation:** an 8B local model won't out-think Claude on a complex brief. The two-pass story → edit planning, three-frame shot logging and your learned taste close much of the gap, and for **your** preferences specifically, the taste model can beat any general model. Rate your first 10–20 reels to train it.
+
+## Color
+
+- **Shot matching (on by default):** every shot's white balance and exposure is matched to the rest of the reel before the look, so cuts don't jump between color temperatures. Only near-neutral pixels are measured, so grass or sky can't fool it.
+- **21 film-style looks:** each one is a full grade baked into a 3D LUT and applied by FFmpeg. Grades use filmic curves, split toning, hue-selective adjustments with skin protection, and monochrome mixes. Includes Kodak 2383, Fuji Eterna, teal & orange, bleach bypass, cross process, matte pastel, high key, neon night, noir, sepia and more.
+- **Texture:** halation (the red film glow around highlights), bloom, grain and vignette.
+- **HDR iPhone video:** HLG and Dolby Vision/PQ clips are tone-mapped to SDR, instead of looking flat and washed out.
+- **Your own LUTs:** put `.cube` files in `assets/luts/` and they appear as looks.
+- **Look Lab:** every look previewed on a frame of your reel. Click one to re-render.
+
 ## See exactly how each reel was made
 
 Under the video, **How this reel was made** shows the following for every version (v1, v2, …):

@@ -54,6 +54,7 @@
         <label class="tog"><input type="checkbox" id="optBeat" checked><span></span><div><b>Beat-synced cuts</b><small>Cuts snap to the music's beats</small></div></label>
         <label class="tog"><input type="checkbox" id="optCap"><span></span><div><b>Auto-captions</b><small>Word-by-word captions from speech</small></div></label>
         <label class="tog"><input type="checkbox" id="optReframe" checked><span></span><div><b>Smart 9:16 reframing</b><small>Tracks faces &amp; subjects when cropping</small></div></label>
+        <label class="tog"><input type="checkbox" id="optColor" checked><span></span><div><b>Auto color match</b><small>Balances every shot's white balance &amp; exposure so cuts don't jump, before the look</small></div></label>
       </div>
       <div class="row">
         <span class="label">Quality</span>
@@ -105,15 +106,26 @@
             <div class="timeline" id="timeline"></div>
           </div>
 
+          <div class="card hidden" id="lookCard">
+            <h3>Look Lab <span class="muted small">click a grade to re-render this edit with it. Your picks teach the taste model</span></h3>
+            <div class="looks" id="lookGrid"></div>
+          </div>
+
           <div class="card hidden" id="reportCard">
             <div class="rep-head">
               <h3>How this reel was made</h3>
               <div class="versions" id="versions"></div>
             </div>
+            <div class="rate" id="rateBox">
+              <span class="muted small">Rate this version, so it learns your taste</span>
+              <span class="stars" id="stars"></span>
+              <span class="small" id="rateMsg"></span>
+            </div>
             <div class="rep-grid">
               <section><h4>Editor</h4><div id="repEditor"></div></section>
               <section><h4>Brief &amp; settings</h4><div id="repBrief"></div></section>
               <section><h4>Look &amp; sound</h4><div id="repLook"></div></section>
+              <section class="hidden" id="repLearnSec"><h4>Learned from you &amp; applied</h4><div id="repLearn"></div></section>
             </div>
             <h4>Edit decision list <span class="muted small">click a row to jump there in the video</span></h4>
             <div class="edl-wrap"><table class="edl" id="repEdl"></table></div>
@@ -193,6 +205,14 @@
         <input type="text" id="oHost" spellcheck="false" placeholder="http://127.0.0.1:11434">
         <label class="lbl" for="oModel">Model</label>
         <select id="oModel"></select>
+        <label class="lbl" for="oDepth">Planning depth</label>
+        <select id="oDepth">
+          <option value="best">Best: outline the story, then write the edit (2 passes, ~2 min)</option>
+          <option value="fast">Fast: write the edit in one pass (~1 min)</option>
+        </select>
+        <label class="lbl" for="oPlanModel">Planning model <span class="muted">· optional, empty = same as above</span></label>
+        <input type="text" id="oPlanModel" list="oModels" spellcheck="false" placeholder="e.g. qwen3-vl:8b-thinking (slower, reasons more)">
+        <datalist id="oModels"></datalist>
         <div class="btns">
           <button class="primary sm" id="oSave">Save &amp; connect</button>
           <button class="ghost sm" id="oTest">Test connection</button>
@@ -218,6 +238,20 @@
         </div>
         <div class="msg" id="cMsg"></div>
         <div class="msg warn hidden" id="cShell">This key is also set in your shell (e.g. ~/.zshrc). The shell value wins when the app restarts.</div>
+      </section>
+
+      <section class="prov" id="learnSec">
+        <div class="prov-head"><b>Learning (your taste)</b><span class="st" id="stlearn">…</span></div>
+        <div id="learnStats" class="small"></div>
+        <div id="learnBullets"></div>
+        <details class="adv"><summary>What the taste model weighs most</summary><div id="learnWeights" class="small"></div></details>
+        <label class="tog"><input type="checkbox" id="learnOn" checked><span></span><div><b>Learn from my feedback</b>
+          <small>Ratings, downloads, Look Lab picks and revision requests shape future edits</small></div></label>
+        <div class="btns">
+          <a class="ghost sm" id="learnExport" href="/api/learning/export">Export dataset (.jsonl)</a>
+          <button class="ghost sm danger" id="learnReset">Reset learning</button>
+        </div>
+        <div class="msg" id="learnMsg"></div>
       </section>
 
       <section class="prov">

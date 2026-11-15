@@ -132,7 +132,7 @@ def compute_crop_path(info: MediaInfo, src_in: float, src_dur: float, crop_wn: f
     sh = max(2, int(round(sw * info.height / max(1, info.width) / 2)) * 2)
     n = max(2, int(math.ceil(src_dur * sample_fps)) + 1)
     reader = FrameReader(info.path, src_in, src_dur, sw, sh, speed=1.0, fps=sample_fps, src_fps=info.fps,
-                         sar_filter=info.sar_filter, blend_slowmo=False, scale_flags="area")
+                         pre_filters=info.pre_filters(), blend_slowmo=False, scale_flags="area")
     tx, ty, conf = [], [], []
     prev = None
     try:

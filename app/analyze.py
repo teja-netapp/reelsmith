@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .effects import load_font
+from .grading import frame_color_stats, shot_color
 from .reframe import FaceDetector
 from .video_io import MediaInfo, sample_frames
 
@@ -43,6 +44,7 @@ def analyze_clip(info: MediaInfo, clip_id: str, face_det: FaceDetector | None, t
     thumb_every = 0.5 if dur <= 600 else (1.0 if dur <= 1800 else 2.0)
     face_every = 0.5
     times, scores, sharp, bright, sat, motion = [], [], [], [], [], []
+    col_cast, col_luma, col_frac = [], [], []  # per-sample color stats -> shot matching at render time
     face_samples = []  # (t, has_face, cx)
     thumbs: dict[float, bytes] = {}
     prev_hsv = prev_gray = None
@@ -58,6 +60,10 @@ def analyze_clip(info: MediaInfo, clip_id: str, face_det: FaceDetector | None, t
             sc = float(np.abs(hsv - prev_hsv).mean())
             mo = float(np.abs(gray - prev_gray).mean())
         prev_hsv, prev_gray = hsv, gray
+        cast, lum, frac = frame_color_stats(small)
+        col_cast.append(cast)
+        col_luma.append(lum)
+        col_frac.append(frac)
         times.append(round(t, 3))
         scores.append(sc)
         motion.append(mo)
@@ -114,8 +120,10 @@ def analyze_clip(info: MediaInfo, clip_id: str, face_det: FaceDetector | None, t
         mid = (a + b) / 2
         tt = float(thumb_ts[int(np.argmin(np.abs(thumb_ts - mid)))])
         thumb_path = thumbs_dir / f"{sid}.jpg"
+        strip_path = thumbs_dir / f"{sid}_strip.jpg"
         if thumbs:
             thumb_path.write_bytes(thumbs[tt])
+            _write_strip(thumbs, thumb_ts, a, b, strip_path)
         shots.append({
             "id": sid,
             "clip_id": clip_id,
@@ -130,6 +138,8 @@ def analyze_clip(info: MediaInfo, clip_id: str, face_det: FaceDetector | None, t
             "face_frac": round(face_frac, 2),
             "focus_x": round(float(np.mean(fxs)), 3) if fxs else None,
             "thumb": str(thumb_path),
+            "strip": str(strip_path) if strip_path.exists() else None,
+            "color": shot_color([col_cast[i] for i in idx], [col_luma[i] for i in idx], [col_frac[i] for i in idx]),
         })
     if progress:
         progress(1.0)
@@ -149,6 +159,25 @@ def analyze_clip(info: MediaInfo, clip_id: str, face_det: FaceDetector | None, t
         "info": info.to_dict(),
     }
     return clip, shots
+
+
+def _write_strip(thumbs: dict, thumb_ts, a: float, b: float, out: Path, h: int = 200):
+    """Start / middle / end of a shot side by side, so the vision model sees what happens in it."""
+    L = b - a
+    frames = []
+    for t in (a + 0.12 * L, a + 0.5 * L, a + 0.88 * L):
+        tt = float(thumb_ts[int(np.argmin(np.abs(thumb_ts - t)))])
+        img = cv2.imdecode(np.frombuffer(thumbs[tt], np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        frames.append(cv2.resize(img, (max(2, int(img.shape[1] * h / img.shape[0])), h), interpolation=cv2.INTER_AREA))
+    if not frames:
+        return
+    gap = np.full((h, 6, 3), 20, np.uint8)
+    row = [frames[0]]
+    for f in frames[1:]:
+        row += [gap, f]
+    cv2.imwrite(str(out), np.hstack(row), [cv2.IMWRITE_JPEG_QUALITY, 82])
 
 
 def score_shots(shots: list[dict]):

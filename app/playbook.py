@@ -9,7 +9,8 @@ from __future__ import annotations
 import base64
 import json
 
-from .effects import CAPTION_STYLES, LOOK_DESCRIPTIONS, LOOKS, TEXT_POSITIONS, TEXT_STYLES
+from .effects import CAPTION_STYLES, TEXT_POSITIONS, TEXT_STYLES
+from .grading import look_descriptions, look_names
 from .reframe import MOTIONS
 from .transitions import TRANSITIONS
 
@@ -33,7 +34,7 @@ Speed ramp = one continuous moment split into consecutive segments with differen
 - Transitions: use 'cut' for most edits; stylised transitions land harder when rare (at most ~1 in 4 edits) and \
 must match the mood: {json.dumps({k: v[1] for k, v in TRANSITIONS.items()})}
 - Camera motion per segment: {json.dumps(MOTIONS)}. Avoid identical motion on consecutive segments.
-- Looks: {json.dumps(LOOK_DESCRIPTIONS)}. Grain suits film/vintage looks; letterbox suits 'cinematic' briefs.
+- Looks (each is a full film-style grade; shots are color-matched automatically first): {json.dumps(look_descriptions())}. Grain suits film/vintage looks; letterbox suits 'cinematic' briefs.
 - Text: optional, max ~6 words, only when it adds value or the brief asks for it. cinematic_title for an opening \
 title / place / theme; bold for punchy hooks; subtitle for a quiet line; kicker for small labels.
 - Audio: when music is present it plays under everything. Keep the original sound on segments where it matters \
@@ -61,7 +62,7 @@ PLAN_SCHEMA = {
         "reasoning": {"type": "string",
                       "description": "2-4 sentences: the creative concept, the hook, structure and pacing."},
         "title": {"type": "string", "description": "Short working title for the reel."},
-        "look": {"type": "string", "enum": list(LOOKS)},
+        "look": {"type": "string", "enum": look_names()},
         "look_intensity": {"type": "number", "minimum": 0, "maximum": 1.2},
         "grain": {"type": "number", "minimum": 0, "maximum": 1, "description": "film grain amount, 0 = none"},
         "vignette": {"type": "number", "minimum": 0, "maximum": 1},
@@ -167,7 +168,11 @@ def music_lines(music: dict | None, energy: bool = True) -> list[str]:
 def build_context_text(analysis: dict, music: dict | None, options: dict, description: str) -> str:
     """Context for big vision models (Claude / Gemini), who also receive the contact sheets."""
     tr_all = analysis.get("transcripts", {})
+    from .learning import get_learner
+
+    house = get_learner().prompt_block(description)
     L = ["# Creative brief", description.strip() or "(no brief: make a polished, engaging reel)", "",
+         *([house, ""] if house else []),
          "# Settings", *settings_lines(options, music), "", "# Footage", *clip_lines(analysis), "",
          "# Shots (id | start-end s | dur | score | motion | faces | speech)"]
     for s in analysis["shots"]:

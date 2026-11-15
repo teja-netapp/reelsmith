@@ -39,6 +39,26 @@ def video_encoder() -> str:
     return "libx264"
 
 
+@functools.lru_cache(maxsize=1)
+def _filters() -> str:
+    try:
+        return subprocess.run([FFMPEG, "-hide_banner", "-filters"], capture_output=True, text=True).stdout
+    except Exception:
+        return ""
+
+
+def has_filter(name: str) -> bool:
+    return f" {name} " in _filters()
+
+
+def hdr_tonemap_filter() -> str | None:
+    """HLG/PQ (e.g. iPhone HDR video) -> SDR Rec.709. Without this HDR clips decode flat and washed out."""
+    if has_filter("zscale") and has_filter("tonemap"):
+        return ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+                "zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+    return None
+
+
 @dataclass
 class MediaInfo:
     path: str
@@ -49,6 +69,11 @@ class MediaInfo:
     has_video: bool = False
     has_audio: bool = False
     sar_filter: str | None = None  # filter to square pixels if needed
+    hdr: str | None = None         # "hlg" / "pq" when the clip is HDR
+    hdr_filter: str | None = None  # tone-mapping filter applied first when decoding
+
+    def pre_filters(self) -> list[str]:
+        return [f for f in (self.hdr_filter, self.sar_filter) if f]
 
     def to_dict(self):
         return {
@@ -60,6 +85,8 @@ class MediaInfo:
             "has_video": self.has_video,
             "has_audio": self.has_audio,
             "sar_filter": self.sar_filter,
+            "hdr": self.hdr,
+            "hdr_filter": self.hdr_filter,
         }
 
     @classmethod
@@ -113,6 +140,10 @@ def probe(path: str) -> MediaInfo:
         mi.width, mi.height = w, h
         fps = _ratio(v.get("avg_frame_rate"), 0.0) or _ratio(v.get("r_frame_rate"), 30.0)
         mi.fps = fps if 1 < fps < 241 else 30.0
+        trc = (v.get("color_transfer") or "").lower()
+        if trc in ("arib-std-b67", "smpte2084"):
+            mi.hdr = "hlg" if trc == "arib-std-b67" else "pq"
+            mi.hdr_filter = hdr_tonemap_filter()
     return mi
 
 
@@ -136,15 +167,19 @@ class FrameReader:
         sar_filter: str | None = None,
         blend_slowmo: bool = True,
         scale_flags: str = "bicubic",
+        pre_filters: list[str] | None = None,
+        post_filters: list[str] | None = None,
+        cwd: str | None = None,
     ):
         self.w, self.h = int(out_w), int(out_h)
-        vf: list[str] = []
-        if sar_filter:
+        vf: list[str] = list(pre_filters or [])   # HDR tone-map, square pixels
+        if sar_filter and sar_filter not in vf:
             vf.append(sar_filter)
         if crop:
             cw, ch, cx, cy = crop
             vf.append(f"crop={int(cw)}:{int(ch)}:{int(cx)}:{int(cy)}")
         vf.append(f"scale={self.w}:{self.h}:flags={scale_flags}")
+        vf += list(post_filters or [])            # e.g. lut3d color grade (file relative to cwd)
         if abs(speed - 1.0) > 1e-3:
             vf.append(f"setpts=(PTS-STARTPTS)/{speed:.5f}")
         else:
@@ -161,7 +196,8 @@ class FrameReader:
             "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
         ]
         self._err = tempfile.TemporaryFile()
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=self._err, bufsize=self.w * self.h * 3 * 2)
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=self._err, bufsize=self.w * self.h * 3 * 2,
+                                     cwd=cwd)
         self.nbytes = self.w * self.h * 3
 
     def read(self) -> np.ndarray | None:
@@ -272,9 +308,7 @@ def sample_frames(path: str, info: MediaInfo, every: float, width: int = 320):
     """Yield (time, frame) at a fixed interval over the whole clip with one decoding pass."""
     w = int(width) // 2 * 2
     h = max(2, int(round(w * info.height / max(1, info.width) / 2)) * 2)
-    vf = []
-    if info.sar_filter:
-        vf.append(info.sar_filter)
+    vf = info.pre_filters()
     vf += [f"fps={1.0 / every:.5f}", f"scale={w}:{h}:flags=area", "format=bgr24"]
     cmd = [FFMPEG, "-nostdin", "-v", "error", "-i", path, "-an", "-sn", "-vf", ",".join(vf),
            "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
@@ -297,7 +331,7 @@ def sample_frames(path: str, info: MediaInfo, every: float, width: int = 320):
 def grab_frame(path: str, info: MediaInfo, t: float, width: int = 480) -> np.ndarray | None:
     w = int(width) // 2 * 2
     h = max(2, int(round(w * info.height / max(1, info.width) / 2)) * 2)
-    vf = ([info.sar_filter] if info.sar_filter else []) + [f"scale={w}:{h}", "format=bgr24"]
+    vf = info.pre_filters() + [f"scale={w}:{h}", "format=bgr24"]
     cmd = [FFMPEG, "-nostdin", "-v", "error", "-ss", f"{max(0, t):.3f}", "-i", path, "-frames:v", "1",
            "-vf", ",".join(vf), "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
     res = subprocess.run(cmd, capture_output=True)

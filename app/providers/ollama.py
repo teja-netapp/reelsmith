@@ -17,21 +17,25 @@ import base64
 import hashlib
 import io
 import json
+import os
 
 from PIL import Image
 
 from ..analyze import select_shots
 from ..audio import CACHE
 from .. import config as C
-from ..effects import CAPTION_STYLES, LOOKS, TEXT_STYLES
+from ..effects import CAPTION_STYLES, TEXT_STYLES
+from ..grading import look_names
 from ..playbook import (FORMAT_NOTE, PRINCIPLES, ROLE, clip_lines, music_lines, settings_lines,
                         transcript_lines, words_in)
 from ..reframe import MOTIONS
 from ..transitions import TRANSITIONS
+from ..learning import get_learner
 from .base import Provider, ProviderError, http_json, parse_json_loose
 
 SHOT_TYPES = ["wide", "medium", "close_up", "detail", "aerial", "pov", "text_or_screen"]
 MOODS = ["joyful", "calm", "epic", "romantic", "moody", "energetic", "funny", "nostalgic", "neutral"]
+CAMERAS = ["static", "pan", "tilt", "handheld", "zoom", "drone", "tracking"]
 
 SHOT_SCHEMA = {
     "type": "object",
@@ -43,12 +47,33 @@ SHOT_SCHEMA = {
         "mood": {"type": "string", "enum": MOODS},
         "quality": {"type": "integer"},
         "hook": {"type": "integer"},
+        "best_part": {"type": "string", "enum": ["start", "middle", "end"]},
+        "camera": {"type": "string", "enum": CAMERAS},
+        "action": {"type": "string"},
     },
-    "required": ["description", "subject", "subject_x", "shot_type", "mood", "quality", "hook"],
+    "required": ["description", "subject", "subject_x", "shot_type", "mood", "quality", "hook", "best_part",
+                 "camera", "action"],
 }
+
+LOG_PROMPT_STRIP = """You are logging footage for a video editor. The image shows THREE moments of ONE shot side by
+side: its start (left), middle and end (right). Fill in:
+- description: what happens during the shot, max 15 words
+- action: the key action or change from start to end, max 8 words ("" if nothing changes)
+- best_part: which moment is strongest to use: start, middle or end
+- camera: how the camera moves: static, pan, tilt, handheld, zoom, drone or tracking
+- subject: the main subject, 2-4 words
+- subject_x: horizontal position of the main subject in the MIDDLE frame: 0 = left edge, 0.5 = centre, 1 = right edge
+- shot_type: one of wide, medium, close_up, detail, aerial, pov, text_or_screen
+- mood: the feeling of the shot
+- quality: 1-10 technical quality (sharp, well exposed, well composed, not shaky)
+- hook: 1-10 how eye-catching this would be as the very first shot of an Instagram Reel
+Answer in JSON."""
 
 LOG_PROMPT = """You are logging footage for a video editor. Look at this frame from a video clip and fill in:
 - description: what is happening, max 15 words
+- action: the key action, max 8 words
+- best_part: "middle" (only one frame is visible)
+- camera: your best guess of the camera movement: static, pan, tilt, handheld, zoom, drone or tracking
 - subject: the main subject, 2-4 words
 - subject_x: horizontal position of the main subject: 0 = left edge, 0.5 = centre, 1 = right edge
 - shot_type: one of wide, medium, close_up, detail, aerial, pov, text_or_screen
@@ -90,6 +115,17 @@ def _guess_pace(description: str) -> str:
     return "medium"
 
 
+def story_schema(shot_ids: list[str]) -> dict:
+    sec = {"type": "object", "properties": {
+        "name": {"type": "string", "enum": ["hook", "build", "peak", "resolve"]},
+        "shots": {"type": "array", "items": {"type": "string", "enum": shot_ids}},
+        "feeling": {"type": "string"}}, "required": ["name", "shots", "feeling"]}
+    return {"type": "object", "properties": {
+        "concept": {"type": "string"}, "title": {"type": "string"},
+        "sections": {"type": "array", "items": sec, "minItems": 2, "maxItems": 6}},
+        "required": ["concept", "title", "sections"]}
+
+
 def compact_schema(shot_ids: list[str]) -> dict:
     seg = {
         "type": "object",
@@ -112,7 +148,7 @@ def compact_schema(shot_ids: list[str]) -> dict:
             "concept": {"type": "string"},
             "title": {"type": "string"},
             "pace": {"type": "string", "enum": list(PACE_LEN)},
-            "look": {"type": "string", "enum": list(LOOKS)},
+            "look": {"type": "string", "enum": look_names()},
             "grain": {"type": "string", "enum": ["none", "light", "medium", "heavy"]},
             "letterbox": {"type": "boolean"},
             "caption_style": {"type": "string", "enum": list(CAPTION_STYLES)},
@@ -176,12 +212,13 @@ class OllamaProvider(Provider):
             if s.get("vlm"):
                 stats["cached"] += 1
                 continue
+            img_path = s.get("strip") if s.get("strip") and os.path.exists(s["strip"]) else s["thumb"]
             try:
-                raw = open(s["thumb"], "rb").read()
+                raw = open(img_path, "rb").read()
             except Exception:
                 stats["failed"] += 1
                 continue
-            key = hashlib.sha1(raw + C.OLLAMA_MODEL.encode()).hexdigest()[:20]
+            key = hashlib.sha1(raw + C.OLLAMA_MODEL.encode() + b"v2").hexdigest()[:20]
             cpath = CACHE / f"vlm_{key}.json"
             if cpath.exists():
                 s["vlm"] = json.loads(cpath.read_text())
@@ -189,8 +226,10 @@ class OllamaProvider(Provider):
                 continue
             progress(0.05 + 0.45 * i / max(1, n), f"Local AI is logging shot {i + 1}/{n} ({s['id']})")
             try:
-                d = self.chat(C.OLLAMA_MODEL, "You are a precise footage logger. Reply only with JSON.", LOG_PROMPT,
-                              SHOT_SCHEMA, images=[_img_b64(s["thumb"])], temperature=0.1, num_ctx=4096,
+                strip = img_path != s["thumb"]
+                d = self.chat(C.OLLAMA_MODEL, "You are a precise footage logger. Reply only with JSON.",
+                              LOG_PROMPT_STRIP if strip else LOG_PROMPT, SHOT_SCHEMA,
+                              images=[_img_b64(img_path, 768 if strip else 448)], temperature=0.1, num_ctx=4096,
                               timeout=300)
             except Exception as e:
                 log(f"shot logging failed for {s['id']}: {e}")
@@ -200,6 +239,9 @@ class OllamaProvider(Provider):
             d["quality"] = int(min(10, max(1, int(d.get("quality", 5) or 5))))
             d["hook"] = int(min(10, max(1, int(d.get("hook", 5) or 5))))
             d["description"] = str(d.get("description", ""))[:160]
+            d["action"] = str(d.get("action", ""))[:80]
+            if d.get("best_part") not in ("start", "middle", "end"):
+                d["best_part"] = "middle"
             d["model"] = C.OLLAMA_MODEL
             s["vlm"] = d
             cpath.write_text(json.dumps(d))
@@ -222,23 +264,26 @@ class OllamaProvider(Provider):
     # -- 2. editing ---------------------------------------------------------------------------
     def _shot_log_lines(self, shots, analysis) -> list[str]:
         tr_all = analysis.get("transcripts", {})
-        out = ["# Shot log (id | length | quality | hook | type | mood | what happens | speech)"]
+        out = ["# Shot log (id | length | quality | hook | type | camera | mood | best part | what happens | speech)"]
         for s in shots:
             v = s.get("vlm") or {}
             q = (s["score"] * 10 + v.get("quality", s["score"] * 10)) / 2
             ws = words_in(tr_all.get(s["clip_id"]), s["start"], s["end"])
             sp = (' | says: "' + " ".join(w["word"] for w in ws[:16]) + '"') if ws else ""
             mo = " | high motion" if s.get("motion", 0) > 0.6 else ""
+            act = f" ({v['action']})" if v.get("action") else ""
             out.append(f"{s['id']} | {s['duration']:.1f}s | {q:.0f}/10 | {v.get('hook', '?')}/10 | "
-                       f"{v.get('shot_type', '?')} | {v.get('mood', '?')} | {v.get('description', '(not logged)')}"
-                       f"{mo}{sp}")
+                       f"{v.get('shot_type', '?')} | {v.get('camera', '?')} | {v.get('mood', '?')} | "
+                       f"{v.get('best_part', 'middle')} | {v.get('description', '(not logged)')}{act}{mo}{sp}")
         return out
 
-    def _prompt(self, shots, analysis, music, options, description, pace) -> str:
+    def _prompt(self, shots, analysis, music, options, description, pace, story: dict | None = None) -> str:
         target = float(options.get("target_duration", 30))
         lo, hi = PACE_LEN[pace]
         n_lo, n_hi = max(2, int(target / hi)), max(3, int(round(target / lo)))
+        house = get_learner().prompt_block(description)
         L = ["# Creative brief", description.strip() or "(no brief: make a polished, engaging reel)", "",
+             *([house, ""] if house else []),
              "# Settings", *settings_lines(options, music), "", "# Footage", *clip_lines(analysis), "",
              *self._shot_log_lines(shots, analysis)]
         tl = transcript_lines(analysis, 2500)
@@ -247,6 +292,12 @@ class OllamaProvider(Provider):
         L += [""] + music_lines(music, energy=False)
         beat = f" Make seconds multiples of the beat ({music['beat_interval']:.2f}s)." if music and options.get(
             "beat_sync") else ""
+        if story:
+            L += ["", "# Story outline to follow (you wrote it in the previous step)", f"Concept: {story.get('concept', '')}"]
+            for sec in story.get("sections", []):
+                L.append(f"- {sec.get('name')}: {', '.join(sec.get('shots', []))}"
+                         + (f" ({sec['feeling']})" if sec.get("feeling") else ""))
+            L.append("Use the outline's shots in this order (drop or add one only if needed for timing).")
         L += ["", "# Your task",
               f"Write the edit. The seconds of all segments must add up to about {target:.0f}. "
               f"Use roughly {n_lo}-{n_hi} segments ({lo:.1f}-{hi:.1f} s each for a {pace} pace).{beat} "
@@ -273,12 +324,44 @@ class OllamaProvider(Provider):
         shots = self._local_shots(analysis)
         stats = self.log_shots(shots, log, progress)
         pace = _guess_pace(description)
-        progress(0.55, f"Local AI ({C.OLLAMA_PLAN_MODEL}) is writing the edit - about a minute on a laptop")
-        cp = self.chat(C.OLLAMA_PLAN_MODEL, self._system(), self._prompt(shots, analysis, music, options, description,
-                                                                          pace),
-                       compact_schema([s["id"] for s in shots]), temperature=0.5)
+        ids = [s["id"] for s in shots]
+        story = None
+        if C.OLLAMA_PLAN_DEPTH == "best":
+            progress(0.5, f"Local AI ({C.OLLAMA_PLAN_MODEL}) is outlining the story (step 1 of 2)")
+            try:
+                story = self.chat(C.OLLAMA_PLAN_MODEL, self._system(), self._story_prompt(shots, analysis, music,
+                                                                                         options, description, pace),
+                                  story_schema(ids), temperature=0.6)
+                story["sections"] = [sec for sec in story.get("sections", []) if sec.get("shots")]
+            except Exception as e:
+                log(f"story outline failed ({e}); writing the edit in one pass")
+                story = None
+        progress(0.6, f"Local AI ({C.OLLAMA_PLAN_MODEL}) is writing the edit"
+                      + (" (step 2 of 2)" if story else " - about a minute on a laptop"))
+        cp = self.chat(C.OLLAMA_PLAN_MODEL, self._system(),
+                       self._prompt(shots, analysis, music, options, description, pace, story),
+                       compact_schema(ids), temperature=0.45)
         self.last_meta = self._meta(stats, len(shots))
+        self.last_meta["plan_depth"] = "story outline + edit (2 passes)" if story else "single pass"
+        if story:
+            self.last_meta["story"] = {sec.get("name"): sec.get("shots") for sec in story.get("sections", [])}
         return compact_to_raw(cp, analysis, music)
+
+    def _story_prompt(self, shots, analysis, music, options, description, pace) -> str:
+        target = float(options.get("target_duration", 30))
+        lo, hi = PACE_LEN[pace]
+        n = max(3, int(round(target / ((lo + hi) / 2))))
+        house = get_learner().prompt_block(description)
+        L = ["# Creative brief", description.strip() or "(no brief: make a polished, engaging reel)", "",
+             *([house, ""] if house else []), "# Settings", *settings_lines(options, music), "",
+             *self._shot_log_lines(shots, analysis), "", *music_lines(music, energy=False), "",
+             "# Your task: outline the story before editing",
+             f"Pick about {n} shots and group them into sections: hook (1 shot: the most striking, or what the brief "
+             "asks to open with), build (shots that set the scene and raise energy), peak (the best moments), resolve "
+             "(1-2 shots that end it on a strong, calm image). Order shots so they flow: wide -> medium -> close, "
+             "matching movement direction across cuts. Each shot at most once. Write 'feeling' as 2-5 words per "
+             "section. concept = your idea in one sentence."]
+        return "\n".join(L)
 
     def refine(self, prev_plan, feedback, analysis, music, options, description, log, progress):
         prev_ids = [s.get("shot_id") for s in prev_plan.get("segments", [])]

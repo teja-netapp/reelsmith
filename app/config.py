@@ -46,7 +46,7 @@ def _int(name: str, default: int) -> int:
 def reload() -> None:
     """(Re)read AI settings from the environment. Called at import and after the UI saves settings."""
     global LLM_PROVIDER, CLAUDE_MODEL, GEMINI_MODEL, OLLAMA_HOST, OLLAMA_MODEL, OLLAMA_PLAN_MODEL
-    global OLLAMA_NUM_CTX, LOCAL_MAX_SHOTS, WHISPER_MODEL, MAX_SHOTS_FOR_PLANNER
+    global OLLAMA_NUM_CTX, LOCAL_MAX_SHOTS, WHISPER_MODEL, MAX_SHOTS_FOR_PLANNER, OLLAMA_PLAN_DEPTH
     # Which AI plans the edit: auto | gemini | ollama | claude | heuristic
     LLM_PROVIDER = _env("LLM_PROVIDER", "auto").lower()
     CLAUDE_MODEL = _env("CLAUDE_MODEL", "claude-sonnet-5-5")
@@ -55,6 +55,7 @@ def reload() -> None:
     OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen3-vl:8b-instruct")       # vision: logs every shot
     OLLAMA_PLAN_MODEL = _env("OLLAMA_PLAN_MODEL", OLLAMA_MODEL)          # writes the edit
     OLLAMA_NUM_CTX = _int("OLLAMA_NUM_CTX", 16384)
+    OLLAMA_PLAN_DEPTH = _env("OLLAMA_PLAN_DEPTH", "best").lower()  # best = story outline + edit, fast = 1 pass
     LOCAL_MAX_SHOTS = _int("LOCAL_MAX_SHOTS", 30)
     WHISPER_MODEL = _env("WHISPER_MODEL", "base")
     MAX_SHOTS_FOR_PLANNER = _int("REELSMITH_MAX_SHOTS", 72)

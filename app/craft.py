@@ -87,11 +87,12 @@ class _Log:
         self.items.append({"rule": rule, "change": change, "why": why})
 
 
-def _variety(segs, log: _Log):
+def _variety(segs, log: _Log, taste: dict | None = None):
     """Transition restraint (<= ~30% stylised, no identical ones back-to-back) and camera-move variety."""
     segs[0]["transition_in"] = "cut"
     styl = [i for i, s in enumerate(segs) if i > 0 and s["transition_in"] != "cut"]
-    allowed = max(1, round(0.3 * (len(segs) - 1)))
+    frac = float((taste or {}).get("styl_max", 0.3))   # your learned transition budget, default ~30%
+    allowed = max(1, round(frac * (len(segs) - 1)))
     if len(styl) > allowed:
         step = len(styl) / allowed
         keep_idx = {styl[int(k * step)] for k in range(allowed)}
@@ -122,7 +123,8 @@ def _variety(segs, log: _Log):
             segs[i]["motion"] = alt
 
 
-def polish(plan: dict, analysis: dict, options: dict, level: str = "light", description: str = "") -> dict:
+def polish(plan: dict, analysis: dict, options: dict, level: str = "light", description: str = "",
+           taste: dict | None = None) -> dict:
     segs = [dict(s) for s in plan.get("segments", [])]
     if not segs:
         return plan
@@ -200,9 +202,27 @@ def polish(plan: dict, analysis: dict, options: dict, level: str = "light", desc
         kept.append(s)
     segs = kept
 
+    taste = taste or {}
+    # 2b. your stated dislikes apply to every editor: banned transitions, slow motion
+    avoid = set(taste.get("avoid_transitions", []))
+    for s in segs[1:]:
+        if s["transition_in"] in avoid:
+            log.add("your taste", f"{log.desc(s)}: {s['transition_in']} → cut", "you've told me you don't like it")
+            s["transition_in"] = "cut"
+    if taste.get("slowmo_frac") == -1:
+        for s in segs:
+            if s["speed"] < 0.95:
+                out = _out(s)
+                s["speed"] = 1.0
+                s["end"] = round(min(shot_bounds(s)[1], s["start"] + out), 3)
+                log.add("your taste", f"{log.desc(s)}: slow motion → normal speed", "you prefer no slow motion")
+
     if full:
-        # 3. pacing bounds (speech may run longer)
+        # 3. pacing bounds (speech may run longer) - centred on your learned shot length if known
         lo_d, hi_d = PACE_BOUNDS[pace]
+        if taste.get("avg_len"):
+            L = float(taste["avg_len"])
+            lo_d, hi_d = max(0.4, 0.55 * L), max(1.2, 1.7 * L)
         for s in segs:
             cap = 8.0 if s.get("keep_audio") else hi_d
             d = _out(s)
@@ -303,7 +323,7 @@ def polish(plan: dict, analysis: dict, options: dict, level: str = "light", desc
             log.add("ending", "added a fade-out", "end the reel cleanly")
         plan["fade_out"] = True
         # 7. variety (last, so it also covers reordered / added segments)
-        _variety(segs, log)
+        _variety(segs, log, taste)
 
     plan["segments"] = segs
     plan["pace"] = pace

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0: a local editor that learns your taste, and a new color engine
+- **Learning loop (on by default).**
+  - **Signals:** every ★ rating, download, Look Lab pick and revision request ("faster, warmer, no glitch") trains a taste model: a small reward model learned online from your preferences.
+  - **How it applies:**
+    - Your learned house style and your favourite past edits go into the local AI's prompt.
+    - The assistant editor follows your learned pace, transition budget and dislikes.
+    - After the AI writes its plan, about 15–35 variants (pace, transitions, look, grain, letterbox, slow motion) are scored by the taste model and the best is rendered. Now and then a near-best or new look is tried, so it keeps learning.
+  - **Settings → Learning** shows what it learned, its confidence and your rating trend, with pause, reset and export (JSONL dataset).
+  - **Simulation:** `tests/simulate_learning.py` checks the loop with a simulated user. Their ratings rise over the rounds and the learned house style matches their hidden taste.
+- **Smarter local editor.**
+  - The vision model sees **three frames per shot** (start, middle, end). It logs the action, the best part of the shot and the camera movement.
+  - **Best mode** writes a **story outline** (hook, build, peak, resolve) first, then the detailed edit (2 passes). **Fast** mode does one pass.
+  - You can set an optional **planning model** (e.g. `qwen3-vl:8b-thinking`).
+- **New color engine.**
+  - **Per-shot color matching:** white balance and exposure are matched across the reel, using only near-neutral pixels so grass or sky can't fool it.
+  - **21 film-style looks** baked into 3D LUTs and applied by FFmpeg's `lut3d`. They use filmic curves, split toning, hue-selective grading with skin protection, and monochrome mixes. New: Kodak 2383, Fuji Eterna, bleach bypass, cross process, matte pastel, high key, desert heat, emerald moody, cinematic cool, sepia.
+  - **Halation and bloom**, plus grain and vignette.
+  - **HDR (HLG/PQ) iPhone video** is tone-mapped to SDR, so it no longer looks washed out.
+  - **Your own `.cube` LUTs** in `assets/luts/` appear as looks.
+- **Look Lab:** previews of every look on a frame of your reel; click one to re-render with it.
+- **Reports:** a new "Learned from you & applied" section and per-shot color-match notes.
+
 ## 0.4.1
 - **Choose your own Gemini model.** In Settings → Google Gemini, type any model name in the Model field (e.g. a free-tier `gemini-3.1-flash-lite`), or leave it empty for Auto. Suggestions list every model your key can see, including Gemma.
 - **Test model button.** It checks that the name exists and makes one tiny request, so you know your key's tier can actually use the model:

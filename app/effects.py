@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import functools
-import math
 import os
 import re
 
@@ -10,6 +9,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from . import grading as _G
 from .config import FONTS_DIR
 
 # ----------------------------------------------------------------------------------------------
@@ -48,94 +48,26 @@ def load_font(role: str, size: int) -> ImageFont.FreeTypeFont:
 
 
 # ----------------------------------------------------------------------------------------------
-# Color grades ("looks")
-# Channel tuples are (R, G, B) offsets applied in shadows / mids / highlights.
+# Looks now live in grading.py (3D-LUT color engine). Re-exported here for compatibility.
 # ----------------------------------------------------------------------------------------------
-LOOKS: dict[str, dict] = {
-    "none": {},
-    "clean": dict(contrast=1.05, sat=1.06),
-    "teal_orange": dict(contrast=1.12, sat=1.12, shadows=(-0.05, 0.012, 0.075), highs=(0.065, 0.012, -0.06)),
-    "warm_film": dict(contrast=1.06, sat=0.9, lift=0.05, gain=0.96, mids=(0.035, 0.012, -0.04)),
-    "golden_hour": dict(contrast=1.05, sat=1.15, mids=(0.06, 0.025, -0.07), highs=(0.03, 0.012, -0.03)),
-    "moody": dict(contrast=1.2, sat=0.72, gamma=1.12, shadows=(-0.02, 0.015, 0.05)),
-    "noir": dict(contrast=1.35, sat=0.0, gamma=1.05),
-    "vintage": dict(contrast=0.95, sat=0.78, lift=0.08, gain=0.93, shadows=(0.0, 0.03, 0.05),
-                    highs=(0.04, 0.02, -0.04)),
-    "vibrant": dict(contrast=1.08, sat=1.35, mids=(0.01, 0.0, -0.01)),
-    "cool_blue": dict(contrast=1.06, sat=0.85, mids=(-0.03, 0.0, 0.05), shadows=(-0.01, 0.0, 0.03)),
-    "neon_night": dict(contrast=1.15, sat=1.3, shadows=(0.05, -0.03, 0.10), highs=(0.04, -0.02, 0.02)),
-}
-
-LOOK_DESCRIPTIONS = {
-    "none": "no grade",
-    "clean": "natural, slightly punchier",
-    "teal_orange": "blockbuster: teal shadows, warm skin/highlights",
-    "warm_film": "soft faded film stock, warm mids",
-    "golden_hour": "sunset warmth, rich saturation",
-    "moody": "dark, desaturated, cold shadows",
-    "noir": "high-contrast black & white",
-    "vintage": "faded 70s/80s print, lifted blacks",
-    "vibrant": "bright, saturated, social-first",
-    "cool_blue": "clean cold nordic tones",
-    "neon_night": "magenta/blue night-city punch",
-}
-
-
-def _solve_k(c: float) -> float:
-    lo, hi = 1e-4, 30.0
-    for _ in range(60):
-        k = (lo + hi) / 2
-        slope = 0.5 * k / math.tanh(k / 2)
-        if slope < c:
-            lo = k
-        else:
-            hi = k
-    return (lo + hi) / 2
-
-
-def _contrast(y: np.ndarray, c: float) -> np.ndarray:
-    if abs(c - 1.0) < 1e-3:
-        return y
-    if c < 1.0:
-        return 0.5 + (y - 0.5) * c
-    k = _solve_k(c)
-    return 0.5 + 0.5 * np.tanh(k * (y - 0.5)) / math.tanh(k * 0.5)
-
-
-def build_grade(look: str, intensity: float = 1.0):
-    """Return (bgr 3-channel LUT for cv2.LUT, saturation multiplier)."""
-    p = LOOKS.get(look, {})
-    intensity = float(np.clip(intensity, 0.0, 1.5))
-    x = np.linspace(0, 1, 256)
-    chans = []
-    for ch in range(3):  # R, G, B
-        y = p.get("lift", 0.0) + (p.get("gain", 1.0) - p.get("lift", 0.0)) * x
-        y = np.clip(y, 0, 1) ** p.get("gamma", 1.0)
-        y = _contrast(y, p.get("contrast", 1.0))
-        ws = np.clip(1 - y / 0.6, 0, 1) ** 2
-        wh = np.clip((y - 0.4) / 0.6, 0, 1) ** 2
-        wm = np.clip(1 - np.abs(y - 0.5) / 0.5, 0, 1)
-        y = (y + p.get("shadows", (0, 0, 0))[ch] * ws + p.get("mids", (0, 0, 0))[ch] * wm
-             + p.get("highs", (0, 0, 0))[ch] * wh)
-        y = np.clip(y, 0, 1)
-        y = x + intensity * (y - x)
-        chans.append(np.clip(np.round(y * 255), 0, 255).astype(np.uint8))
-    r, g, b = chans
-    lut = np.stack([b, g, r], axis=1).reshape(256, 1, 3)
-    sat = 1.0 + intensity * (p.get("sat", 1.0) - 1.0)
-    return lut, sat
+LOOKS = _G.LOOK_PARAMS
+LOOK_DESCRIPTIONS = _G.LOOK_DESCRIPTIONS_BUILTIN
 
 
 class FinishingPass:
-    """Per-frame global finishing: grade -> vignette -> grain -> letterbox."""
+    """Per-frame finishing after the LUT grade: halation -> bloom -> vignette -> grain -> letterbox.
 
-    def __init__(self, W: int, H: int, look="clean", intensity=1.0, grain=0.0, vignette=0.0,
-                 letterbox=False, seed=7):
+    Halation: the red-orange glow film gets around bright highlights. Bloom: soft white glow.
+    Both are computed at quarter resolution (cheap) and added back.
+    """
+
+    def __init__(self, W: int, H: int, grain=0.0, vignette=0.0, letterbox=False, halation=0.0, bloom=0.0,
+                 seed=7, **_ignored):
         self.W, self.H = W, H
-        self.lut, self.sat = build_grade(look, intensity)
-        self.identity = look == "none" or intensity <= 0.01
         self.rng = np.random.default_rng(seed)
         self.grain = float(np.clip(grain, 0, 1))
+        self.halation = float(np.clip(halation, 0, 1))
+        self.bloom = float(np.clip(bloom, 0, 1))
         self.vig = None
         if vignette > 0.01:
             yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
@@ -162,13 +94,22 @@ class FinishingPass:
     def safe_bottom(self):
         return self.H - self.bar
 
+    def _glow(self, frame, threshold, sigma, tint, strength):
+        sw, sh = max(2, self.W // 4), max(2, self.H // 4)
+        small = cv2.resize(frame, (sw, sh), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+        lum = small @ np.array([0.0722, 0.7152, 0.2126], np.float32)  # BGR luma
+        mask = np.clip((lum - threshold) / (1 - threshold), 0, 1) ** 1.5
+        glow = cv2.GaussianBlur(mask, (0, 0), sigma * sw / 270.0)
+        layer = glow[..., None] * np.array(tint, np.float32)[None, None, :] * (255.0 * strength)
+        layer = cv2.resize(layer, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
+        return cv2.add(frame, np.clip(layer, 0, 255).astype(np.uint8))
+
     def apply(self, frame: np.ndarray, k: int = 0) -> np.ndarray:
         out = frame
-        if not self.identity:
-            out = cv2.LUT(out, self.lut)
-            if abs(self.sat - 1.0) > 0.01:
-                gray = cv2.cvtColor(cv2.cvtColor(out, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
-                out = cv2.addWeighted(out, self.sat, gray, 1.0 - self.sat, 0)
+        if self.halation > 0.01:
+            out = self._glow(out, 0.72, 4.0, (0.15, 0.35, 1.0), 0.55 * self.halation)  # BGR: red-orange
+        if self.bloom > 0.01:
+            out = self._glow(out, 0.65, 9.0, (1.0, 0.97, 0.92), 0.35 * self.bloom)
         if self.vig is not None:
             out = cv2.multiply(out, self.vig, scale=1 / 255.0)
         if self.grain_bank:

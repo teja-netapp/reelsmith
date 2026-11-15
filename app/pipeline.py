@@ -15,6 +15,7 @@ from .config import FACE_MODEL, WORKSPACE
 from .planner import plan_edit, refine_edit, sanitize_plan
 from .reframe import FaceDetector
 from .render import RenderSettings, render
+from .learning import get_learner
 from .report import build_report, mp4_metadata
 from .timeline import build_timeline
 from .video_io import probe
@@ -27,6 +28,7 @@ DEFAULT_OPTIONS = {
     "smart_reframe": True,
     "quality": "final",  # preview | draft | final
     "planner": "auto",   # auto | gemini | ollama | claude | heuristic
+    "auto_color": True,  # shot matching (per-shot white balance + exposure) before the look
 }
 
 _face_det = None
@@ -225,7 +227,8 @@ def run_render(job: Job, trigger: dict | None = None, ai_plan: dict | None = Non
 
     t0 = time.time()
     res = render(tl, job.plan, job.music_info, str(out), str(job.dir / "tmp"), settings, face_detector(),
-                 opts.get("smart_reframe", True), prog, job.log, metadata=mp4_metadata(job.plan, tl, job.version))
+                 opts.get("smart_reframe", True), prog, job.log, metadata=mp4_metadata(job.plan, tl, job.version),
+                 auto_color=opts.get("auto_color", True))
     timings["render"] = round(time.time() - t0, 1)
     timings["total"] = round(sum(v for k, v in timings.items() if k != "total"), 1)
     job.output = str(out)
@@ -240,8 +243,12 @@ def run_render(job: Job, trigger: dict | None = None, ai_plan: dict | None = Non
     job.versions.append({
         "version": v, "created": time.time(), "trigger": trigger.get("type"), "feedback": trigger.get("feedback"),
         "editor": ed.get("label") or job.plan.get("planner"), "model": ed.get("model"),
-        "duration": tl["duration"], "look": job.plan.get("look"), "output": str(out),
+        "duration": tl["duration"], "look": job.plan.get("look"), "output": str(out), "rating": None,
     })
+    try:  # learning: remember this edit (features + summary) so ratings/downloads can teach the model
+        get_learner().record_edit(job.id, v, job.plan, job.analysis, job.options, job.description, trigger.get("type"))
+    except Exception as e:
+        job.log(f"learning: could not record this edit ({e})")
     n_auto = len(job.plan.get("craft_changes", [])) + len(job.plan.get("warnings", []))
     job.log(f"v{v} made by {ed.get('label')} ({ed.get('model') or 'no model'}); {n_auto} automatic fix(es) - "
             f"see 'How this reel was made'")
@@ -268,6 +275,13 @@ def _run(job: Job, mode: str, payload=None):
         elif mode == "refine":
             job.set(0.46, "Revising the edit")
             trigger["feedback"] = payload
+            try:
+                deltas = get_learner().revision(job.id, job.version, payload, job.description)
+                if deltas:
+                    job.log("learning from your request: " + ", ".join(f"{k} {'+' if v > 0 else '-'}"
+                                                                       for k, v in deltas.items()))
+            except Exception as e:
+                job.log(f"learning: could not parse the request ({e})")
             t0 = time.time()
             job.plan = refine_edit(job.plan, payload, job.analysis, job.music_info, job.options, job.description,
                                    job.log, plan_prog)
@@ -275,11 +289,20 @@ def _run(job: Job, mode: str, payload=None):
         elif mode == "plan":
             job.set(0.46, "Validating edited plan")
             prev_editor = (job.plan or {}).get("editor", {}).get("label") or (job.plan or {}).get("planner")
+            old_look = (job.plan or {}).get("look")
+            source = payload.get("_source")
             clean = {k: v for k, v in payload.items() if not k.startswith("_")}
             job.plan = sanitize_plan(clean, job.analysis, job.music_info, job.options)
             job.plan["planner"] = "Manual plan edit"
             job.plan["editor"] = {"provider": "manual", "label": "Manual plan edit (JSON)", "model": None,
                                   "based_on": prev_editor}
+            if source == "look_lab":
+                trigger = {"type": "look", "feedback": f"Look Lab: {old_look} → {job.plan.get('look')}"}
+                job.plan["editor"]["label"] = "Look Lab"
+                try:
+                    get_learner().look_choice(job.id, job.version, old_look, job.plan.get("look"), job.description)
+                except Exception as e:
+                    job.log(f"learning: {e}")
             job.plan["_ai_plan"] = clean
         ai_plan = job.plan.pop("_ai_plan", None)
         ed = job.plan.get("editor") or {}

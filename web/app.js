@@ -29,7 +29,7 @@
     return {
       target_duration: state.length, quality: state.quality, planner: state.planner,
       auto_pick: $("optAuto").checked, beat_sync: $("optBeat").checked,
-      captions: $("optCap").checked, smart_reframe: $("optReframe").checked,
+      captions: $("optCap").checked, smart_reframe: $("optReframe").checked, auto_color: $("optColor").checked,
     };
   }
 
@@ -74,7 +74,14 @@
     ];
     $("pills").innerHTML = pills.map(([t, k, ai]) =>
       `<span class="pill ${k}${ai ? " open-settings" : ""}"${ai ? ' title="Open Settings"' : ""}>${esc(t)}</span>`).join("")
+      + `<span class="pill ok open-settings" id="learnPill" title="Taste model: open Settings">Taste model</span>`
       + `<button class="gear open-settings" title="API keys & AI editors">⚙ Settings</button>`;
+    api("/api/learning").then((l) => {
+      const p = $("learnPill");
+      if (!p) return;
+      p.textContent = l.enabled ? `Taste model · ${l.edits} edits · ${Math.round(l.confidence * 100)}% sure` : "Taste model: paused";
+      p.className = "pill open-settings " + (l.enabled ? "ok" : "warn");
+    }).catch(() => {});
     [...$("aiSeg").children].forEach((b) => {
       const s = providers[b.dataset.v];
       b.classList.toggle("na", !!(s && !s.available));
@@ -141,6 +148,10 @@
     const all = [...new Set([...installed, ...(o.recommended || []), o.model].filter(Boolean))];
     $("oModel").innerHTML = all.map((m) => `<option value="${esc(m)}">${esc(m)}${installed.length && !installed.includes(m) ? " (not downloaded)" : ""}</option>`).join("");
     $("oModel").value = o.model;
+    $("oModels").innerHTML = [...new Set([...installed, "qwen3-vl:8b-thinking", "qwen3-vl:8b-instruct", "qwen3-vl:4b-instruct"])]
+      .map((m) => `<option value="${esc(m)}"></option>`).join("");
+    if (o.plan_depth) $("oDepth").value = o.plan_depth;
+    if (o.plan_model_set !== undefined) $("oPlanModel").value = o.plan_model_set ? o.plan_model : "";
     if (!v) statusChip("stollama", "warn", "Not checked yet");
     else if (v.ok) statusChip("stollama", "ok", `Connected · Ollama ${v.version || ""}`);
     else if (v.auth) statusChip("stollama", "warn", "Connected · model not downloaded");
@@ -161,6 +172,7 @@
     $("setEnv").textContent = s.env_file;
     showCloud("gemini", s.gemini); showCloud("claude", s.claude); showOllama(s.ollama);
     $("dEditor").value = s.default_editor;
+    loadLearning();
     // refresh the real status of what's saved (keys are checked with the provider, never shown)
     const checks = [["ollama", null]];
     if (s.gemini.configured && !s.gemini.verified) checks.push(["gemini", s.gemini]);
@@ -237,8 +249,35 @@
     finally { btn.disabled = false; btn.textContent = "Test model"; }
   };
   $("gModel").addEventListener("keydown", (e) => { if (e.key === "Enter") $("gSave").click(); });
+  async function loadLearning(stats) {
+    let l = stats;
+    try { l = l || await api("/api/learning"); } catch (e) { return; }
+    $("learnOn").checked = l.enabled;
+    statusChip("stlearn", l.enabled ? (l.edits ? "ok" : "warn") : "off",
+      l.enabled ? `${Math.round(l.confidence * 100)}% sure` : "paused");
+    const trend = l.avg_last != null ? ` · average rating went from ${l.avg_first}★ (first 10) to ${l.avg_last}★ (last 10)`
+      : (l.avg_first != null ? ` · average rating so far ${l.avg_first}★` : "");
+    $("learnStats").innerHTML = `<div class="bar2"><div style="width:${Math.round(l.confidence * 100)}%"></div></div>`
+      + `${l.edits} edits · ${l.rated} rated · ${l.downloaded} downloaded · ${l.feedback} revision requests${esc(trend)}`;
+    $("learnBullets").innerHTML = (l.house_style || []).length
+      ? `<ul class="chg">${l.house_style.map((b) => `<li>${esc(b)}</li>`).join("")}</ul>`
+      : `<div class="note">Nothing learned yet. Rate a few reels (★), use Look Lab, or ask for revisions.</div>`;
+    $("learnWeights").innerHTML = (l.learned || []).map((w) =>
+      `<div class="wrow"><span>${esc(w.label)}</span><span class="${w.weight > 0 ? "pos" : "neg"}">${w.weight > 0 ? "likes" : "dislikes"} ${Math.abs(w.weight).toFixed(2)}</span></div>`).join("")
+      || `<div class="note">No weights yet.</div>`;
+  }
+  $("learnOn").onchange = async () => {
+    try { loadLearning(await api("/api/learning", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: $("learnOn").checked }) })); loadConfig(); } catch (e) { setMsg("learnMsg", "bad", esc(e.message)); }
+  };
+  $("learnReset").onclick = async () => {
+    if (!confirm("Forget everything the taste model learned (ratings, preferences, examples)? Your reels are kept.")) return;
+    try { loadLearning(await api("/api/learning/reset", { method: "POST" })); setMsg("learnMsg", "ok", "Learning reset."); loadConfig(); }
+    catch (e) { setMsg("learnMsg", "bad", esc(e.message)); }
+  };
   $("oSave").onclick = async () => {
-    const r = await saveSettings({ ollama: { host: $("oHost").value.trim(), model: $("oModel").value, plan_model: "" } }, "oMsg", $("oSave"));
+    const r = await saveSettings({ ollama: { host: $("oHost").value.trim(), model: $("oModel").value,
+      plan_model: $("oPlanModel").value.trim(), plan_depth: $("oDepth").value } }, "oMsg", $("oSave"));
     if (r) { showOllama(r.settings.ollama, r.results.ollama); }
   };
   $("oTest").onclick = async () => {
@@ -404,11 +443,64 @@
     $("emptyState").classList.add("hidden");
     $("dlBtn").href = `/api/jobs/${id}/output?download=1&v=${v}`;
     renderVersions();
+    renderStars();
+    renderLookLab();
     try { renderReport(report || await api(`/api/jobs/${id}/report?v=${v}`)); }
     catch (e) { $("reportCard").classList.add("hidden"); }
   }
 
-  const TRIG = { new: "New", refine: "Revision", plan: "Manual edit" };
+  // ---------- ratings: every star teaches the taste model ----------
+  function renderStars() {
+    const cur = (state.versions || []).find((x) => x.version === state.viewVersion) || {};
+    const r = cur.rating || 0;
+    $("stars").innerHTML = [1, 2, 3, 4, 5].map((n) =>
+      `<button data-n="${n}" class="${n <= r ? "on" : ""}" title="${n} star${n > 1 ? "s" : ""}">★</button>`).join("");
+    $("rateMsg").textContent = r ? `You rated v${state.viewVersion}: ${r}★` : "";
+  }
+  $("stars").onclick = async (e) => {
+    const b = e.target.closest("button[data-n]");
+    if (!b || !state.jobId) return;
+    const stars = +b.dataset.n;
+    try {
+      const r = await api(`/api/jobs/${state.jobId}/rate`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version: state.viewVersion, stars }) });
+      const cur = (state.versions || []).find((x) => x.version === state.viewVersion);
+      if (cur) cur.rating = stars;
+      renderStars();
+      $("rateMsg").textContent = `Thanks! Learned from it (taste model ${Math.round(r.stats.confidence * 100)}% sure, `
+        + `${r.stats.rated} rated edits)`;
+      loadConfig();
+    } catch (err) { $("rateMsg").textContent = err.message; }
+  };
+
+  // ---------- Look Lab ----------
+  let lookLabFor = null;
+  async function renderLookLab() {
+    const key = `${state.jobId}:${state.lastVersion}`;
+    if (lookLabFor === key) return;
+    lookLabFor = key;
+    let L;
+    try { L = await api(`/api/jobs/${state.jobId}/looks`); } catch (e) { $("lookCard").classList.add("hidden"); return; }
+    $("lookCard").classList.remove("hidden");
+    $("lookGrid").innerHTML = L.looks.map((x) =>
+      `<button class="lk${x.name === L.current ? " on" : ""}${x.liked ? " liked" : ""}" data-look="${esc(x.name)}"
+        title="${esc(x.description)}${x.liked ? " · one of your favourites" : ""}">
+        <img loading="lazy" alt="" src="/api/jobs/${state.jobId}/look_preview?look=${encodeURIComponent(x.name)}">
+        <span>${esc(x.name.replace(/_/g, " "))}</span></button>`).join("");
+  }
+  $("lookGrid").onclick = async (e) => {
+    const b = e.target.closest(".lk");
+    if (!b || b.classList.contains("on")) return;
+    try {
+      await api(`/api/jobs/${state.jobId}/look`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ look: b.dataset.look, options: { quality: state.quality } }) });
+      [...$("lookGrid").children].forEach((x) => x.classList.toggle("on", x === b));
+      lookLabFor = null;
+      openJob(state.jobId);
+    } catch (err) { $("formErr").textContent = err.message; }
+  };
+
+  const TRIG = { new: "New", refine: "Revision", plan: "Manual edit", look: "Look Lab" };
   function renderVersions() {
     const vs = state.versions || [];
     $("versions").innerHTML = vs.length > 1 ? vs.map((x) =>
@@ -432,7 +524,7 @@
     // editor
     const u = ed.usage || {};
     let edHtml = `<div class="big">${esc(ed.label || "?")}</div>` + kv([
-      ["Model", ed.model ? `<code>${esc(ed.model)}</code>${ed.model_version ? ` <span class="sub">(${esc(ed.model_version)})</span>` : ""}${ed.model_source ? ` <span class="sub">· ${esc(ed.model_source)}</span>` : ""}` : "none (rules only)"],
+      ["Model", ed.model ? `<code>${esc(ed.model)}</code>${ed.model_version ? ` <span class="sub">(${esc(ed.model_version)})</span>` : ""}${ed.model_source ? ` <span class="sub">· ${esc(ed.model_source)}</span>` : ""}` : (ed.based_on ? "same edit as before, re-rendered" : "none (rules only)")],
       ed.output_format ? ["Output", esc(ed.output_format)] : null,
       ed.shot_log_model ? ["Shot log", `<code>${esc(ed.shot_log_model)}</code> · ${ed.shots_shown} shots (${ed.shots_logged} new, ${ed.shots_cached} cached${ed.shots_failed ? ", " + ed.shots_failed + " failed" : ""})`] : null,
       ed.runs_on ? ["Runs on", esc(ed.runs_on)] : null,
@@ -488,6 +580,17 @@
     (ch.assistant_editor || []).forEach((c) => items.push(`<li><span class="tag acc">${esc(c.rule)}</span>${esc(c.change)} <span class="why">· ${esc(c.why)}</span></li>`));
     (ch.timeline || []).forEach((t) => items.push(`<li><span class="tag">timeline</span>${esc(t)}</li>`));
     if (ch.beat_sync) items.push(`<li><span class="tag">beat sync</span>${esc(ch.beat_sync)}</li>`);
+    const lr = r.learning;
+    $("repLearnSec").classList.toggle("hidden", !lr || !!lr.error);
+    if (lr && !lr.error) {
+      const ap = lr.applied || [];
+      $("repLearn").innerHTML = `<div class="bar2" title="taste model confidence"><div style="width:${Math.round((lr.confidence || 0) * 100)}%"></div></div>`
+        + `<div class="note">Taste model ${Math.round((lr.confidence || 0) * 100)}% sure · ${lr.candidates || 0} variants scored</div>`
+        + (ap.length ? `<ul class="chg">${ap.map((a) => `<li><span class="tag acc">applied</span>${esc(a)}</li>`).join("")}</ul>`
+          : `<div class="note">The editor's plan already matched your taste, so no changes were needed.</div>`)
+        + (lr.explored ? `<div class="note">Exploring: tried ${esc(lr.explored)}. Rate it so I learn whether you like it.</div>` : "")
+        + ((lr.house_style || []).length ? `<div class="note">House style used: ${lr.house_style.map(esc).join(" · ")}</div>` : "");
+    }
     const nFix = (ch.validation || []).length + (ch.assistant_editor || []).length + (ch.timeline || []).length;
     $("repCount").textContent = nFix ? `${nFix} fix${nFix > 1 ? "es" : ""}` : "none";
     $("repChanges").innerHTML = items.length ? `<ul class="chg">${items.join("")}</ul>`

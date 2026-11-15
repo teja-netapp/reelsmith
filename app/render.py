@@ -6,12 +6,14 @@ import math
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
 
 from .audio import mix_audio
 from .effects import CaptionTrack, FinishingPass, TextOverlay, fade
+from .grading import cube_file, look_texture, match_shots
 from .reframe import CropPath, FaceDetector, compute_crop_path, motion_transform
 from .transitions import TransitionFX
 from .video_io import FrameReader, FrameWriter, MediaInfo, mux
@@ -35,7 +37,8 @@ class RenderSettings:
         return cls()
 
 
-def _segment_frames(seg: dict, idx: int, st: RenderSettings, face_det: FaceDetector | None, smart: bool, log):
+def _segment_frames(seg: dict, idx: int, st: RenderSettings, face_det: FaceDetector | None, smart: bool, log,
+                    lut: tuple[str, str] | None = None):
     """Generator yielding exactly seg['n_frames'] reframed BGR frames of size (W,H)."""
     W, H, fps = st.width, st.height, st.fps
     info = MediaInfo.from_dict(seg["info"])
@@ -80,8 +83,11 @@ def _segment_frames(seg: dict, idx: int, st: RenderSettings, face_det: FaceDetec
     dec_w = max(2, int(round(bw * f / 2)) * 2)
     dec_h = max(2, int(round(bh * f / 2)) * 2)
     fx, fy = dec_w / bw, dec_h / bh
+    post, cwd = [], None
+    if lut:  # (lut file name, directory): graded by FFmpeg's lut3d while decoding - fast, 10-bit-safe math
+        post, cwd = [f"lut3d=file={lut[0]}:interp=tetrahedral"], lut[1]
     reader = FrameReader(info.path, seg["src_in"], src_dur, dec_w, dec_h, crop=(bw, bh, bx0, by0), speed=speed,
-                         fps=fps, src_fps=info.fps, sar_filter=info.sar_filter)
+                         fps=fps, src_fps=info.fps, pre_filters=info.pre_filters(), post_filters=post, cwd=cwd)
     last = None
     try:
         for k in range(n):
@@ -107,12 +113,24 @@ def _segment_frames(seg: dict, idx: int, st: RenderSettings, face_det: FaceDetec
 
 def render(timeline: dict, plan: dict, music: dict | None, out_path: str, work_dir: str,
            settings: RenderSettings, face_det: FaceDetector | None = None, smart_reframe: bool = True,
-           progress=None, log=print, metadata: dict | None = None) -> dict:
+           progress=None, log=print, metadata: dict | None = None, auto_color: bool = True) -> dict:
     W, H, fps = settings.width, settings.height, settings.fps
     segs = timeline["segments"]
     N = timeline["total_frames"]
-    finish = FinishingPass(W, H, plan.get("look", "clean"), plan.get("look_intensity", 0.9),
-                           plan.get("grain", 0.0), plan.get("vignette", 0.0), plan.get("letterbox", False))
+    look = plan.get("look", "clean")
+    tex = look_texture(look)
+    finish = FinishingPass(W, H, grain=plan.get("grain", tex["grain"]), vignette=plan.get("vignette", tex["vignette"]),
+                           letterbox=plan.get("letterbox", False), halation=plan.get("halation", tex["halation"]),
+                           bloom=plan.get("bloom", tex["bloom"]))
+    # color: shot matching (per-shot balance) + the look, baked into one 3D LUT per distinct shot balance
+    lut_dir = os.path.join(work_dir, "luts")
+    corrections = match_shots({s.get("shot_id") or f"seg{i}": s.get("color") for i, s in enumerate(segs)}) \
+        if auto_color else {}
+    luts = []
+    for i, s in enumerate(segs):
+        corr = corrections.get(s.get("shot_id") or f"seg{i}")
+        s["color_correction"] = corr
+        luts.append((cube_file(look, plan.get("look_intensity", 0.9), corr, Path(lut_dir)), lut_dir))
     fx = TransitionFX(W, H)
     texts = [TextOverlay(t["content"], t.get("style", "bold"), t.get("position", "center"), t["start"], t["end"],
                          W, H, finish.safe_top + int(H * 0.04), finish.safe_bottom - int(H * 0.04))
@@ -159,7 +177,7 @@ def render(timeline: dict, plan: dict, music: dict | None, out_path: str, work_d
 
     def gen(i):
         if i not in gens:
-            gens[i] = _segment_frames(segs[i], i, settings, face_det, smart_reframe, log)
+            gens[i] = _segment_frames(segs[i], i, settings, face_det, smart_reframe, log, luts[i])
         return gens[i]
 
     try:

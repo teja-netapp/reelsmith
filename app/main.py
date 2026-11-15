@@ -17,7 +17,9 @@ from . import config as C
 from . import settings as S
 from .audio import whisper_available
 from .config import FACE_MODEL, WEB_DIR
-from .effects import CAPTION_STYLES, LOOK_DESCRIPTIONS, TEXT_STYLES
+from .effects import CAPTION_STYLES, TEXT_STYLES
+from .grading import apply_to_image, look_descriptions, look_family, look_names
+from .learning import get_learner
 from .pipeline import DEFAULT_OPTIONS, Job, Runner
 from .providers import CHOICES, statuses
 from .reframe import MOTIONS
@@ -74,7 +76,7 @@ def _clean_options(raw: dict) -> dict:
             o["target_duration"] = float(min(180, max(5, float(raw["target_duration"]))))
         except Exception:
             pass
-    for k in ("auto_pick", "beat_sync", "captions", "smart_reframe"):
+    for k in ("auto_pick", "beat_sync", "captions", "smart_reframe", "auto_color"):
         if k in raw:
             o[k] = bool(raw[k])
     if raw.get("quality") in ("preview", "draft", "final"):
@@ -115,7 +117,7 @@ def config():
         "face_model": FACE_MODEL.exists(),
         "ffmpeg": check_ffmpeg(),
         "encoder": video_encoder(),
-        "looks": LOOK_DESCRIPTIONS,
+        "looks": look_descriptions(),
         "transitions": {k: v[1] for k, v in TRANSITIONS.items()},
         "motions": MOTIONS,
         "text_styles": list(TEXT_STYLES),
@@ -219,6 +221,10 @@ def get_output(job_id: str, download: int = 0, v: int = 0):
         raise HTTPException(404, "no output yet")
     ver = v if job.output_for(v) else job.version
     if download:
+        try:  # downloading a version is a (weak) "I like this one" signal
+            get_learner().downloaded(job.id, ver)
+        except Exception:
+            pass
         return FileResponse(path, media_type="video/mp4", filename=f"{_slug(job)}-v{ver}.mp4")
     return FileResponse(path, media_type="video/mp4")
 
@@ -294,3 +300,105 @@ def rerender(job_id: str, body: dict = Body(...)):
         job.options = _clean_options({**job.options, **body["options"]})
     runner.submit(job, "plan", plan)
     return {"ok": True}
+
+
+# ----------------------------------------------------------------------------------------------
+# Learning: ratings, Look Lab, taste stats
+# ----------------------------------------------------------------------------------------------
+@app.post("/api/jobs/{job_id}/rate")
+def rate_version(job_id: str, body: dict = Body(...)):
+    job = _get(job_id)
+    try:
+        v, stars = int(body.get("version") or job.version), float(body.get("stars"))
+    except Exception:
+        raise HTTPException(400, "version and stars (1-5) are required")
+    if not 1 <= stars <= 5:
+        raise HTTPException(400, "stars must be 1-5")
+    r = get_learner().rate(job.id, v, stars)
+    for x in job.versions:
+        if x["version"] == v:
+            x["rating"] = stars
+    job.save()
+    return {**r, "stats": get_learner().stats(job.description)}
+
+
+def _hero_thumb(job: Job, v: int = 0):
+    import cv2
+    plan = job.plan or {}
+    if v and (job.dir / f"plan_v{v}.json").exists():
+        plan = json.loads((job.dir / f"plan_v{v}.json").read_text())
+    sid = next((s.get("shot_id") for s in plan.get("segments", []) if re.fullmatch(r"c\d+s\d+", s.get("shot_id") or "")), None)
+    p = job.dir / "thumbs" / f"{sid}.jpg" if sid else None
+    img = cv2.imread(str(p)) if p and p.exists() else None
+    return img, plan
+
+
+@app.get("/api/jobs/{job_id}/looks")
+def list_looks(job_id: str):
+    job = _get(job_id)
+    d = look_descriptions()
+    prof = get_learner().profile(job.description)
+    liked = prof.get("looks") or []
+    return {"current": (job.plan or {}).get("look"), "liked": liked,
+            "looks": [{"name": n, "family": look_family(n), "description": d.get(n, ""), "liked": n in liked}
+                      for n in look_names()]}
+
+
+@app.get("/api/jobs/{job_id}/look_preview")
+def look_preview(job_id: str, look: str):
+    import cv2
+    job = _get(job_id)
+    if look not in look_names():
+        raise HTTPException(404, "unknown look")
+    out = job.dir / "looks" / f"{re.sub(r'[^A-Za-z0-9_-]', '_', look)}.jpg"
+    if not out.exists():
+        img, plan = _hero_thumb(job)
+        if img is None:
+            raise HTTPException(404, "no frame to preview")
+        out.parent.mkdir(exist_ok=True)
+        graded = apply_to_image(img, look, float(plan.get("look_intensity", 0.9)))
+        cv2.imwrite(str(out), graded, [cv2.IMWRITE_JPEG_QUALITY, 86])
+    return FileResponse(str(out), media_type="image/jpeg")
+
+
+@app.post("/api/jobs/{job_id}/look")
+def apply_look(job_id: str, body: dict = Body(...)):
+    """Look Lab: re-render the current edit with another grade (also teaches the taste model)."""
+    job = _get(job_id)
+    if job.status in ("running", "queued"):
+        raise HTTPException(409, "job is busy")
+    look = str(body.get("look", ""))
+    if look not in look_names() or not job.plan:
+        raise HTTPException(400, "unknown look")
+    from .grading import look_texture
+    plan = {k: v for k, v in job.plan.items() if not k.startswith("_")}
+    tex = look_texture(look)
+    plan.update({"look": look, "halation": tex["halation"], "bloom": tex["bloom"], "_source": "look_lab"})
+    if isinstance(body.get("options"), dict):
+        job.options = _clean_options({**job.options, **body["options"]})
+    runner.submit(job, "plan", plan)
+    return {"ok": True}
+
+
+@app.get("/api/learning")
+def learning_stats():
+    return get_learner().stats()
+
+
+@app.post("/api/learning")
+def learning_toggle(body: dict = Body(...)):
+    if "enabled" in body:
+        get_learner().set_enabled(bool(body["enabled"]))
+    return get_learner().stats()
+
+
+@app.post("/api/learning/reset")
+def learning_reset():
+    get_learner().reset()
+    return get_learner().stats()
+
+
+@app.get("/api/learning/export")
+def learning_export():
+    return PlainTextResponse(get_learner().export(), media_type="application/x-ndjson",
+                             headers={"Content-Disposition": 'attachment; filename="reelsmith-taste-dataset.jsonl"'})

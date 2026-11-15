@@ -230,6 +230,7 @@ def get_settings() -> dict:
                    "from_shell": bool({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} & C.SHELL_VARS),
                    "verified": _public_verify("claude", ck), "get_key_url": "https://console.anthropic.com/settings/keys"},
         "ollama": {"host": C.OLLAMA_HOST, "model": C.OLLAMA_MODEL, "plan_model": C.OLLAMA_PLAN_MODEL,
+                   "plan_model_set": bool(C._env("OLLAMA_PLAN_MODEL")), "plan_depth": C.OLLAMA_PLAN_DEPTH,
                    "verified": _public_verify("ollama"), "recommended": RECOMMENDED_OLLAMA},
     }
 
@@ -302,6 +303,11 @@ def save_settings(body: dict) -> dict:
             if not _HOST_OK.match(h):
                 raise SettingsError("Ollama host should look like http://127.0.0.1:11434")
             updates["OLLAMA_HOST"] = h
+        if "plan_depth" in o:
+            d = str(o["plan_depth"]).lower()
+            if d not in ("best", "fast"):
+                raise SettingsError("planning depth must be 'best' or 'fast'")
+            updates["OLLAMA_PLAN_DEPTH"] = d
         for field, var in (("model", "OLLAMA_MODEL"), ("plan_model", "OLLAMA_PLAN_MODEL")):
             if field in o:
                 m = str(o.get(field) or "").strip()

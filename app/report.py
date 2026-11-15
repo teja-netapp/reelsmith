@@ -11,9 +11,25 @@ import time
 
 from . import __version__
 from .craft import fmt_t
-from .effects import LOOK_DESCRIPTIONS
+from .grading import look_descriptions, look_family
 
-TRIGGER_LABELS = {"new": "New reel", "refine": "Revision", "plan": "Manual plan edit"}
+TRIGGER_LABELS = {"new": "New reel", "refine": "Revision", "plan": "Manual plan edit", "look": "Look Lab"}
+
+
+def _color_desc(c):
+    """Human description of a shot-matching correction, e.g. 'warmer 4%, +0.2 EV'."""
+    if not c:
+        return None
+    r, g, b = c.get("wb", (1, 1, 1))
+    parts = []
+    warm = (r - b) / 2
+    if abs(warm) >= 0.015:
+        parts.append(f"{'warmer' if warm > 0 else 'cooler'} {abs(warm) * 100:.0f}%")
+    if abs(g - 1) >= 0.015:
+        parts.append(f"{'less' if g < 1 else 'more'} green {abs(g - 1) * 100:.0f}%")
+    if abs(c.get("ev", 0)) >= 0.05:
+        parts.append(f"{c['ev']:+.1f} EV")
+    return ", ".join(parts) or "matched (no change needed)"
 
 
 def _sound(seg, clip, music):
@@ -78,6 +94,7 @@ def build_report(job, tl: dict, plan: dict, settings, render_res: dict, trigger:
             "text": {"content": t["content"], "style": t.get("style")} if t else None,
             "captions_words": s.get("caption_words", 0),
             "beat_adjust_s": s.get("beat_delta_s"),
+            "color_match": _color_desc(s.get("color_correction")),
             "quality_score": sh.get("score"),
         })
 
@@ -114,7 +131,9 @@ def build_report(job, tl: dict, plan: dict, settings, render_res: dict, trigger:
         "title": plan.get("title"),
         "pace": plan.get("pace"),
         "finishing": {
-            "look": plan.get("look"), "look_description": LOOK_DESCRIPTIONS.get(plan.get("look"), ""),
+            "look": plan.get("look"), "look_description": look_descriptions().get(plan.get("look"), ""),
+            "look_family": look_family(plan.get("look")), "halation": plan.get("halation"), "bloom": plan.get("bloom"),
+            "auto_color": opts.get("auto_color", True),
             "look_intensity": plan.get("look_intensity"), "grain": plan.get("grain"), "vignette": plan.get("vignette"),
             "letterbox": plan.get("letterbox"), "fade_in": plan.get("fade_in"), "fade_out": plan.get("fade_out"),
             "captions": {"style": plan.get("caption_style"), "words": len(tl.get("caption_words", []))}
@@ -143,6 +162,7 @@ def build_report(job, tl: dict, plan: dict, settings, render_res: dict, trigger:
             "frames": render_res.get("frames"), "duration_s": round(render_res.get("duration", 0), 2),
             "render_seconds": render_res.get("render_seconds"), "file_mb": round(size / 1e6, 1) if size else None,
         },
+        "learning": plan.get("learning"),
         "timings_s": timings,
         "files": {"video": os.path.basename(output_path)},
     }
@@ -207,6 +227,7 @@ def report_markdown(r: dict) -> str:
         L += ["## Editor's concept", r["concept"], ""]
     L += ["## Look & sound",
           f"- Look: **{f['look']}** ({f['look_description']}), intensity {f['look_intensity']:.2f}",
+          f"- Shot matching {'on' if f.get('auto_color', True) else 'off'} · halation {f.get('halation') or 0:.2f} · bloom {f.get('bloom') or 0:.2f}",
           f"- Grain {f['grain']:.2f} · vignette {f['vignette']:.2f} · letterbox {'yes' if f['letterbox'] else 'no'} · "
           f"fade in {'yes' if f['fade_in'] else 'no'} · fade out {'yes' if f['fade_out'] else 'no'}"]
     if f.get("captions"):
@@ -229,6 +250,8 @@ def report_markdown(r: dict) -> str:
             extras.append(f"{g['captions_words']} caption words")
         if g["beat_adjust_s"]:
             extras.append(f"beat {g['beat_adjust_s']:+.2f} s")
+        if g.get("color_match") and g["color_match"] != "matched (no change needed)":
+            extras.append(f"color: {g['color_match']}")
         if g.get("what"):
             extras.append(f"_{g['what']}_")
         tr = g["transition_in"] + (f" ({g['transition_s']:.2f} s)" if g["transition_s"] else "")
@@ -247,6 +270,14 @@ def report_markdown(r: dict) -> str:
         L += ["", "**Timeline:**"] + [f"- {t}" for t in ch["timeline"]]
     if ch["beat_sync"]:
         L += ["", f"**Beat sync:** {ch['beat_sync']}"]
+    lr = r.get("learning") or {}
+    if lr and not lr.get("error"):
+        L += ["", "## What it learned from you and applied", f"- Taste model confidence: {lr.get('confidence', 0):.0%} "
+              f"({lr.get('candidates', 0)} variants scored)"]
+        L += [f"- House style: {b}" for b in lr.get("house_style", [])]
+        L += [f"- Applied: {a}" for a in lr.get("applied", [])] or ["- Applied: nothing (the editor's plan already fit)"]
+        if lr.get("explored"):
+            L.append(f"- Exploring: tried {lr['explored']} to keep learning what you like")
     L += ["", "## Render",
           f"- {rd['resolution']} @ {rd['fps']} fps, {rd['codec']}, CRF {rd['crf']} ({rd['preset']}), quality {rd['quality']}",
           f"- {rd['frames']} frames, {rd['duration_s']} s, rendered in {rd['render_seconds']} s"

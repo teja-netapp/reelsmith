@@ -41,7 +41,14 @@ class _Handler(BaseHTTPRequestHandler):
         if has_images:
             n = len(_Handler.requests_log)
             content = {"description": f"test frame {n}", "subject": "yellow box", "subject_x": 0.3,
-                       "shot_type": "medium", "mood": "energetic", "quality": 7, "hook": 3 + n % 7}
+                       "shot_type": "medium", "mood": "energetic", "quality": 7, "hook": 3 + n % 7,
+                       "best_part": "end", "camera": "pan", "action": "box moves right"}
+        elif "sections" in body["format"]["properties"]:  # story outline pass
+            ids = body["format"]["properties"]["sections"]["items"]["properties"]["shots"]["items"]["enum"]
+            content = {"concept": "fake story", "title": "Fake Story", "sections": [
+                {"name": "hook", "shots": ids[:1], "feeling": "bold"},
+                {"name": "build", "shots": ids[1:3], "feeling": "rising"},
+                {"name": "resolve", "shots": ids[-1:], "feeling": "calm"}]}
         else:
             ids = body["format"]["properties"]["segments"]["items"]["properties"]["shot"]["enum"]
             trs = ["cut", "glitch", "glitch", "flash", "whip_left", "light_leak", "zoom_punch"]
