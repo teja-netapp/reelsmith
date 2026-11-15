@@ -1,0 +1,28 @@
+# secrets
+.env
+
+# environments
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# downloaded at setup (re-created by ./setup.sh)
+models/*.onnx
+assets/fonts/*.ttf
+assets/fonts/*.otf
+
+# your footage, renders, caches
+workspace/
+*.mp4
+*.mov
+*.m4v
+*.mkv
+*.mp3
+*.m4a
+*.wav
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

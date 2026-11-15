@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reelsmith</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="logo">◐</span> Reelsmith <span class="tag" id="ver">AI reel editor</span></div>
+    <div class="pills" id="pills"></div>
+  </header>
+
+  <main class="layout">
+    <!-- ============ LEFT: brief ============ -->
+    <section class="panel brief">
+      <h2>1 · Footage</h2>
+      <label class="drop" id="clipDrop">
+        <input type="file" id="clipInput" accept="video/*,.mov,.mkv,.mts" multiple hidden>
+        <div class="drop-inner">
+          <div class="drop-icon">＋</div>
+          <div><b>Drop clips or full-length videos</b><br><span class="muted">MP4 · MOV · MKV — landscape or vertical</span></div>
+        </div>
+      </label>
+      <ul class="files" id="clipList"></ul>
+
+      <h2>2 · Music <span class="muted small">(optional — enables beat-synced cuts)</span></h2>
+      <label class="drop slim" id="musicDrop">
+        <input type="file" id="musicInput" accept="audio/*,video/*" hidden>
+        <div class="drop-inner"><div class="drop-icon">♪</div><div id="musicLabel"><b>Add a track</b> <span class="muted">MP3 · M4A · WAV</span></div></div>
+      </label>
+
+      <h2>3 · Describe the reel</h2>
+      <textarea id="desc" rows="5" placeholder="e.g. Moody cinematic travel reel of Lisbon. Open on the tram shot, slow-mo the waves, warm film look, title &quot;LISBON&quot;, end on the sunset."></textarea>
+      <div class="chips" id="examples"></div>
+
+      <h2>4 · Options</h2>
+      <div class="row">
+        <span class="label">Length</span>
+        <div class="seg" id="lengthSeg">
+          <button data-v="15">15s</button><button data-v="30" class="on">30s</button><button data-v="45">45s</button><button data-v="60">60s</button><button data-v="90">90s</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="label">AI editor</span>
+        <div class="seg" id="aiSeg">
+          <button data-v="auto" class="on">Auto</button><button data-v="gemini">Gemini</button><button data-v="ollama">Local</button><button data-v="claude">Claude</button><button data-v="heuristic">Rules</button>
+        </div>
+      </div>
+      <div class="hint" id="aiHint"></div>
+      <div class="toggles">
+        <label class="tog"><input type="checkbox" id="optAuto" checked><span></span><div><b>Auto-pick best moments</b><small>Claude watches every shot and chooses the strongest</small></div></label>
+        <label class="tog"><input type="checkbox" id="optBeat" checked><span></span><div><b>Beat-synced cuts</b><small>Cuts snap to the music's beats</small></div></label>
+        <label class="tog"><input type="checkbox" id="optCap"><span></span><div><b>Auto-captions</b><small>Word-by-word captions from speech</small></div></label>
+        <label class="tog"><input type="checkbox" id="optReframe" checked><span></span><div><b>Smart 9:16 reframing</b><small>Tracks faces &amp; subjects when cropping</small></div></label>
+      </div>
+      <div class="row">
+        <span class="label">Quality</span>
+        <div class="seg" id="qualSeg">
+          <button data-v="preview">Fast preview</button><button data-v="final" class="on">Final 1080×1920</button>
+        </div>
+      </div>
+      <details class="adv">
+        <summary>Advanced — use files already on this Mac (no upload)</summary>
+        <textarea id="paths" rows="3" placeholder="/Users/you/Movies/trip.mov&#10;/Volumes/SSD/drone.mp4"></textarea>
+        <small class="muted">One absolute path per line. Handy for very large full-length videos.</small>
+      </details>
+      <button class="primary" id="goBtn">✦ Create reel</button>
+      <div class="err" id="formErr"></div>
+
+      <div class="recent">
+        <h3>Recent reels</h3>
+        <ul id="recentList"></ul>
+      </div>
+    </section>
+
+    <!-- ============ RIGHT: result ============ -->
+    <section class="panel result">
+      <div class="stage">
+        <div class="phone">
+          <video id="player" playsinline loop></video>
+          <div class="empty" id="emptyState">
+            <div class="big">9:16</div>
+            <p>Your reel appears here</p>
+          </div>
+          <div class="busy hidden" id="busy">
+            <div class="ring"></div>
+            <div class="stage-text" id="stageText">Starting…</div>
+            <div class="bar"><div id="barFill"></div></div>
+            <div class="pct" id="pct">0%</div>
+          </div>
+        </div>
+        <div class="side">
+          <div class="card hidden" id="planCard">
+            <div class="plan-head">
+              <div>
+                <div class="eyebrow" id="plannerName"></div>
+                <h2 id="planTitle"></h2>
+              </div>
+              <a class="primary small" id="dlBtn" href="#">⬇ Download MP4</a>
+            </div>
+            <p class="reason" id="planReason"></p>
+            <div class="stats" id="planStats"></div>
+            <div class="timeline" id="timeline"></div>
+          </div>
+
+          <div class="card hidden" id="refineCard">
+            <h3>Revise with words</h3>
+            <textarea id="feedback" rows="3" placeholder="Make it punchier, open on the drone shot, add more slow-mo, warmer colours…"></textarea>
+            <div class="chips" id="refineChips"></div>
+            <button class="primary" id="refineBtn">↻ Revise &amp; re-render</button>
+            <details class="adv">
+              <summary>Edit the plan JSON directly</summary>
+              <textarea id="planJson" rows="14" spellcheck="false"></textarea>
+              <button class="ghost" id="jsonBtn">Re-render this plan</button>
+            </details>
+          </div>
+
+          <details class="card logs" id="logCard">
+            <summary>Activity log</summary>
+            <pre id="logs"></pre>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
