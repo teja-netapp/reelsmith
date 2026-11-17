@@ -30,8 +30,63 @@
       target_duration: state.length, quality: state.quality, planner: state.planner,
       auto_pick: $("optAuto").checked, beat_sync: $("optBeat").checked,
       captions: $("optCap").checked, smart_reframe: $("optReframe").checked, auto_color: $("optColor").checked,
+      grading: $("optGrade").checked, grade_strength: +$("optStrength").value / 100,
     };
   }
+
+  // ---------- colour grading switch ----------
+  const GRADE_HINT = $("gradeHint").innerHTML;
+  function syncGrade() {
+    const on = $("optGrade").checked;
+    $("gradeSub").classList.toggle("off", !on || !!state.briefRaw);
+    $("strengthVal").textContent = $("optStrength").value + "%";
+    if (!state.briefRaw) $("gradeHint").innerHTML = on ? GRADE_HINT
+      : "<b>Off:</b> your footage keeps its original colours. Only transitions, effects, text &amp; captions are added.";
+  }
+  $("optGrade").onchange = syncGrade;
+  $("optStrength").oninput = syncGrade;
+
+  // ---------- your instructions, detected live (they're enforced as hard rules) ----------
+  function ruleChips(pub, lead) {
+    const all = (pub && pub.rules) || [];
+    const only = all.filter((r) => /^Only what you asked for/.test(r.label));
+    const rest = all.filter((r) => !/^Only what you asked for/.test(r.label));
+    const chip = (label, title) => {
+      const grade = /colou?r|grading|look/i.test(label);
+      const off = /^(no |don't|cuts only|keep the original|mute|original audio only|nothing)/i.test(label);
+      return `<span class="rule${grade ? " grade" : off ? " off" : ""}" title="${esc(title)}">${esc(label)}</span>`;
+    };
+    const chips = rest.map((r) => chip(r.label, r.source));
+    if (only.length) chips.push(chip("Nothing else added", only.map((r) => r.label.replace("Only what you asked for: ", "")).join(" · ")));
+    return chips.length ? `<span class="lead">${esc(lead)}</span>${chips.join("")}` : "";
+  }
+  function detector(textId, outId, lead, revision) {
+    let timer = null, last = "";
+    const run = async () => {
+      const text = $(textId).value.trim();
+      if (text === last) return;
+      last = text;
+      let pub = { rules: [] };
+      if (text) {
+        try { pub = await api("/api/directives", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, revision }) }); } catch (e) { return; }
+      }
+      const html = ruleChips(pub, lead);
+      $(outId).innerHTML = html;
+      $(outId).classList.toggle("hidden", !html);
+      if (!revision) {
+        state.briefRaw = !!pub.raw_color;
+        if (state.briefRaw && $("optGrade").checked) {
+          $("gradeHint").innerHTML = "<b>Your brief says not to touch the colours</b>, so this reel keeps the original colours.";
+          $("gradeSub").classList.add("off");
+        } else { state.briefRaw = false; syncGrade(); }
+      }
+    };
+    $(textId).addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(run, 350); });
+    return run;
+  }
+  const detectBrief = detector("desc", "descRules", "I'll follow:", false);
+  detector("feedback", "fbRules", "I'll follow:", true);
 
   // ---------- config pills & AI editor selector ----------
   const AI_NAMES = { auto: "Auto", gemini: "Gemini", ollama: "Local AI", claude: "Claude", heuristic: "Rules" };
@@ -337,7 +392,7 @@
   $("examples").innerHTML = EXAMPLES.map((x) => `<span class="chip">${esc(x.split(",")[0])}</span>`).join("");
   $("examples").onclick = (e) => {
     const i = [...$("examples").children].indexOf(e.target);
-    if (i >= 0) $("desc").value = EXAMPLES[i];
+    if (i >= 0) { $("desc").value = EXAMPLES[i]; detectBrief(); }
   };
   $("refineChips").innerHTML = REFINES.map((x) => `<span class="chip">${esc(x)}</span>`).join("");
   $("refineChips").onclick = (e) => {
@@ -412,6 +467,7 @@
     let j;
     try { j = await api(`/api/jobs/${state.jobId}`); } catch (e) { return; }
     $("logs").textContent = (j.logs || []).join("\n");
+    state.job = j;
     if (j.status === "running" || j.status === "queued") {
       showBusy(j.stage, j.progress);
       $("refineBtn").disabled = true; $("jsonBtn").disabled = true;
@@ -482,22 +538,66 @@
     let L;
     try { L = await api(`/api/jobs/${state.jobId}/looks`); } catch (e) { $("lookCard").classList.add("hidden"); return; }
     $("lookCard").classList.remove("hidden");
-    $("lookGrid").innerHTML = L.looks.map((x) =>
+    const j = state.job || {}, o = j.options || {};
+    const graded = !(j.plan && j.plan.grading === false);
+    $("llGrade").checked = graded;
+    $("llStrength").value = Math.round((o.grade_strength ?? 1) * 100);
+    $("llStrengthVal").textContent = $("llStrength").value + "%";
+    $("llApply").classList.add("hidden");
+    $("lookGrid").classList.toggle("off", !graded);
+    $("llHint").textContent = graded ? "off = original colours" : "off: original colours. Turn on, then pick a look";
+    lookLabData = L;
+    drawLooks();
+  }
+  let lookLabData = null;
+  function drawLooks() {
+    const L = lookLabData;
+    if (!L) return;
+    const st = +$("llStrength").value / 100;
+    const tile = (x) =>
       `<button class="lk${x.name === L.current ? " on" : ""}${x.liked ? " liked" : ""}" data-look="${esc(x.name)}"
-        title="${esc(x.description)}${x.liked ? " · one of your favourites" : ""}">
-        <img loading="lazy" alt="" src="/api/jobs/${state.jobId}/look_preview?look=${encodeURIComponent(x.name)}">
-        <span>${esc(x.name.replace(/_/g, " "))}</span></button>`).join("");
+        title="${esc(x.label)}: ${esc(x.description)}${x.liked ? " · one of your favourites" : ""}">
+        <img loading="lazy" alt="" src="/api/jobs/${state.jobId}/look_preview?look=${encodeURIComponent(x.name)}&strength=${st}">
+        <span>${esc(x.label)}</span></button>`;
+    $("lookGrid").innerHTML = (L.categories || []).map((c) => {
+      const items = L.looks.filter((x) => x.category === c);
+      return items.length ? `<div class="lk-cat">${esc(c)}</div>${items.map(tile).join("")}` : "";
+    }).join("");
   }
   $("lookGrid").onclick = async (e) => {
     const b = e.target.closest(".lk");
     if (!b || b.classList.contains("on")) return;
     try {
-      await api(`/api/jobs/${state.jobId}/look`, { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ look: b.dataset.look, options: { quality: state.quality } }) });
+      await relook(b.dataset.look, { grading: true });
       [...$("lookGrid").children].forEach((x) => x.classList.toggle("on", x === b));
-      lookLabFor = null;
-      openJob(state.jobId);
     } catch (err) { $("formErr").textContent = err.message; }
+  };
+  async function relook(look, extra) {
+    await api(`/api/jobs/${state.jobId}/look`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ look, options: { quality: state.quality, grade_strength: +$("llStrength").value / 100, ...extra } }) });
+    lookLabFor = null;
+    openJob(state.jobId);
+  }
+  $("llGrade").onchange = async () => {
+    const on = $("llGrade").checked;
+    $("lookGrid").classList.toggle("off", !on);
+    if (!on) {  // back to the original colours: re-render with no grading at all
+      try { await relook("none", { grading: false }); } catch (err) { $("formErr").textContent = err.message; }
+    } else {
+      $("llHint").textContent = "pick a look below";
+    }
+  };
+  let llTimer = null;
+  $("llStrength").oninput = () => {
+    $("llStrengthVal").textContent = $("llStrength").value + "%";
+    $("llApply").classList.toggle("hidden", !$("llGrade").checked);
+    clearTimeout(llTimer);
+    llTimer = setTimeout(drawLooks, 300);  // previews follow the strength
+  };
+  $("llApply").onclick = async () => {
+    const cur = state.job && state.job.plan && state.job.plan.look;
+    if (!cur || cur === "none") return;
+    try { await relook(cur, { grading: true }); } catch (err) { $("formErr").textContent = err.message; }
   };
 
   const TRIG = { new: "New", refine: "Revision", plan: "Manual edit", look: "Look Lab" };
@@ -521,6 +621,16 @@
     if (!r) return;
     $("reportCard").classList.remove("hidden");
     const ed = r.editor || {}, s = r.settings || {}, f = r.finishing || {}, a = r.audio || {}, ch = r.changes || {};
+    // your instructions (hard rules) and what had to be fixed to obey them
+    const ins = r.instructions || {};
+    $("repRulesSec").classList.toggle("hidden", !(ins.rules || []).length);
+    if ((ins.rules || []).length) {
+      const enf = ins.enforced || [];
+      $("repRules").innerHTML = `<div class="rules">${ruleChips(ins, "").replace('<span class="lead"></span>', "")}</div>`
+        + `<ul>${ins.rules.map((x) => `<li>${esc(x.label)} <span class="src">· ${esc(x.source)}</span></li>`).join("")}</ul>`
+        + (enf.length ? `<div class="note"><b>The editor didn't fully follow them, so I fixed:</b></div><ul>${enf.map((c) => `<li>${esc(c.change)}</li>`).join("")}</ul>`
+          : `<div class="note">The editor's plan already obeyed them: nothing had to be changed.</div>`);
+    }
     // editor
     const u = ed.usage || {};
     let edHtml = `<div class="big">${esc(ed.label || "?")}</div>` + kv([
@@ -550,7 +660,8 @@
     // look & sound
     const m = a.music;
     $("repLook").innerHTML = kv([
-      ["Look", `<b>${esc((f.look || "").replace(/_/g, " "))}</b> <span class="sub">${esc(f.look_description || "")}</span>`],
+      f.grading === false ? ["Colour", `<b>Original colours</b> <span class="sub">grading off: no look, no shot matching, untouched pixels</span>`]
+        : ["Look", `<b>${esc((f.look || "").replace(/_/g, " "))}</b> <span class="sub">${esc(f.look_description || "")}${f.grade_strength !== undefined && f.grade_strength !== 1 ? " · strength " + Math.round(f.grade_strength * 100) + "%" : ""}</span>`],
       ["Finish", [`intensity ${(+f.look_intensity).toFixed(2)}`, `grain ${(+f.grain).toFixed(2)}`, `vignette ${(+f.vignette).toFixed(2)}`,
         f.letterbox ? "letterbox" : null, f.fade_in ? "fade in" : null, f.fade_out ? "fade out" : null].filter(Boolean).join(" · ")],
       ["Text", (f.texts || []).map((t) => `“${esc(t.content)}” <span class="sub">${esc(t.style)} ${t.from_s.toFixed(1)}–${t.to_s.toFixed(1)} s</span>`).join("<br>") || "none"],
@@ -624,7 +735,7 @@
     const stats = [
       `${(tl.duration || p.estimated_duration || 0).toFixed(1)}s`,
       `${p.segments.length} shots`,
-      `look: ${p.look.replace(/_/g, " ")}`,
+      p.grading === false ? "original colours" : `look: ${p.look.replace(/_/g, " ")}`,
       p.grain > 0.05 ? `grain ${Math.round(p.grain * 100)}%` : null,
       p.letterbox ? "letterbox" : null,
       tl.beats_snapped ? `${tl.beats_snapped} cuts on beat` : null,
@@ -638,9 +749,14 @@
       const thumbId = /^c\d+s\d+$/.test(s.shot_id) ? s.shot_id : null;
       const bg = thumbId ? `style="background-image:url('/api/jobs/${j.id}/thumb/${thumbId}')"` : "";
       const tr = i === 0 ? "start" : (t ? t.transition_in : s.transition_in);
+      const fx = s.effect && s.effect !== "none" ? s.effect : "";
+      const dropped = i > 0 && t && t.transition_in !== s.transition_in;
       return `<div class="seg-card" title="${esc(s.shot_id)} ${s.start.toFixed(1)}–${s.end.toFixed(1)}s${s.text ? " · text: " + esc(s.text.content) : ""}">
-        <div class="th" ${bg}><span>${d}s${s.speed !== 1 ? " · " + s.speed + "×" : ""}</span></div>
-        <div class="tr">${esc(tr.replace(/_/g, " "))}</div><div class="mo">${esc(s.motion.replace(/_/g, " "))}${s.text ? " · T" : ""}</div></div>`;
+        <div class="th" ${bg}><span>${d}s${s.speed !== 1 ? " · " + s.speed + "×" : ""}</span>
+          <button class="fxb${fx ? " on" : ""}" data-i="${i}" title="clip effect on this shot">${fx ? esc(fx.replace(/_/g, " ")) : "+ fx"}</button></div>
+        ${i === 0 ? `<div class="tr">start</div>`
+          : `<button class="tr pick" data-i="${i}" title="${dropped ? "planned " + esc(s.transition_in) + " - shots too short, became a cut. " : ""}change the transition into this shot">${esc(tr.replace(/_/g, " "))} ▾</button>`}
+        <div class="mo">${esc(s.motion.replace(/_/g, " "))}${s.text ? " · T" : ""}</div></div>`;
     }).join("");
     const ta = $("planJson");
     if (document.activeElement !== ta) {
@@ -649,6 +765,99 @@
       ta.value = JSON.stringify(clean, null, 2);
     }
   }
+
+  // ---------- per-cut transition / per-shot effect picker (previews on your own shots) ----------
+  let catalog = null, pick = null;
+  async function loadCatalog() { if (!catalog) catalog = await api("/api/transitions"); return catalog; }
+  function planForEdit() {
+    const p = JSON.parse(JSON.stringify(state.job.plan));
+    ["planner", "warnings", "estimated_duration", "editor", "craft_changes", "craft_notes"].forEach((k) => delete p[k]);
+    return p;
+  }
+  const shotOf = (k) => { const s = state.job.plan.segments[k]; return s && /^c\d+s\d+$/.test(s.shot_id) ? s.shot_id : ""; };
+  const tileHtml = (x, cur, src, poster) =>
+    `<button class="pv${x.name === cur ? " on" : ""}" data-name="${esc(x.name)}" title="${esc(x.description)}${x.beat ? " (beat-synced)" : ""}">
+      <video muted loop playsinline preload="none" data-src="${esc(src)}"${poster ? ` poster="${esc(poster)}"` : ""}></video>
+      <span>${esc(x.name.replace(/_/g, " "))}</span></button>`;
+  function drawPicker() {
+    const j = state.jobId, i = pick.i, cur = pick.cur;
+    if (pick.kind === "tr") {
+      $("popTabs").innerHTML = catalog.categories.map((c) =>
+        `<button data-c="${c.key}" class="${c.key === pick.cat ? "on" : ""}">${esc(c.label)}</button>`).join("");
+      const cat = catalog.categories.find((c) => c.key === pick.cat) || catalog.categories[0];
+      const a = shotOf(i - 1), b = shotOf(i);
+      $("popGrid").innerHTML = cat.items.map((x) => tileHtml(x, cur,
+        `/api/transition_preview?name=${x.name}&job=${j}&a=${a}&b=${b}`, a ? `/api/jobs/${j}/thumb/${a}` : "")).join("");
+    } else {
+      const s = shotOf(i);
+      $("popGrid").innerHTML = catalog.effects.map((x) => tileHtml(x, cur,
+        `/api/effect_preview?name=${x.name}&job=${j}&shot=${s}`, s ? `/api/jobs/${j}/thumb/${s}` : "")).join("");
+    }
+    [...$("popGrid").querySelectorAll(".pv")].forEach((b) => {
+      const v = b.querySelector("video");
+      b.addEventListener("mouseenter", () => { if (!v.src) v.src = v.dataset.src; v.play().catch(() => {}); });
+      b.addEventListener("mouseleave", () => v.pause());
+      b.addEventListener("focus", () => { if (!v.src) v.src = v.dataset.src; v.play().catch(() => {}); });
+    });
+  }
+  async function openPicker(kind, i, anchor) {
+    if (!state.job || !state.job.plan || state.job.status === "running") return;
+    try { await loadCatalog(); } catch (e) { $("formErr").textContent = e.message; return; }
+    const seg = state.job.plan.segments[i];
+    const cur = kind === "tr" ? seg.transition_in : (seg.effect || "none");
+    const c = catalog.categories.find((c) => c.items.some((x) => x.name === cur));
+    pick = { kind, i, cur, cat: kind === "tr" ? (c && c.key !== "cut" ? c.key : catalog.categories[1].key) : null };
+    $("popTitle").textContent = kind === "tr" ? `Transition into shot ${i + 1}` : `Effect on shot ${i + 1}`;
+    $("popSub").textContent = `now: ${cur.replace(/_/g, " ")}`;
+    $("popAllLabel").textContent = kind === "tr" ? "use it for every cut" : "use it on every shot";
+    $("popAll").checked = false;
+    $("popTabs").classList.toggle("hidden", kind !== "tr");
+    drawPicker();
+    const pop = $("pop");
+    pop.classList.remove("hidden");
+    const r = anchor.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
+    const left = Math.min(window.innerWidth - pw - 12, Math.max(12, r.left + r.width / 2 - pw / 2));
+    let top = r.bottom + 8;
+    if (top + ph > window.innerHeight - 12) top = Math.max(12, r.top - ph - 8);
+    pop.style.left = left + "px"; pop.style.top = top + "px";
+  }
+  function closePicker() {
+    $("pop").classList.add("hidden");
+    [...$("popGrid").querySelectorAll("video")].forEach((v) => { v.pause(); v.removeAttribute("src"); v.load(); });
+    pick = null;
+  }
+  $("timeline").onclick = (e) => {
+    const t = e.target.closest(".tr.pick"), f = e.target.closest(".fxb");
+    if (t) openPicker("tr", +t.dataset.i, t);
+    else if (f) openPicker("fx", +f.dataset.i, f);
+  };
+  $("popTabs").onclick = (e) => {
+    const b = e.target.closest("button[data-c]");
+    if (b && pick) { pick.cat = b.dataset.c; drawPicker(); }
+  };
+  $("popClose").onclick = closePicker;
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pick) closePicker(); });
+  document.addEventListener("mousedown", (e) => {
+    if (pick && !$("pop").contains(e.target) && !e.target.closest(".tr.pick, .fxb")) closePicker();
+  });
+  $("popGrid").onclick = async (e) => {
+    const b = e.target.closest(".pv");
+    if (!b || !pick) return;
+    const name = b.dataset.name, all = $("popAll").checked, kind = pick.kind, i = pick.i;
+    const plan = planForEdit();
+    const dur = (catalog.categories.flatMap((c) => c.items).find((x) => x.name === name) || {}).duration || 0;
+    plan.segments.forEach((s, k) => {
+      if (kind === "tr") {
+        if (k > 0 && (all || k === i)) { s.transition_in = name; s.transition_duration = dur; }
+      } else if (all || k === i) s.effect = name;
+    });
+    closePicker();
+    try {
+      await api(`/api/jobs/${state.jobId}/render`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan, options: { quality: state.quality } }) });
+      openJob(state.jobId);
+    } catch (err) { $("formErr").textContent = err.message; }
+  };
 
   $("refineBtn").onclick = async () => {
     const fb = $("feedback").value.trim();

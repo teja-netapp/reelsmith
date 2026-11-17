@@ -29,6 +29,8 @@ DEFAULT_OPTIONS = {
     "quality": "final",  # preview | draft | final
     "planner": "auto",   # auto | gemini | ollama | claude | heuristic
     "auto_color": True,  # shot matching (per-shot white balance + exposure) before the look
+    "grading": True,     # master switch: False = raw footage colours (only transitions / effects are added)
+    "grade_strength": 1.0,  # 0-1.5 multiplier on the look
 }
 
 _face_det = None
@@ -62,6 +64,7 @@ class Job:
         self.version = 0
         self.output: str | None = None
         self.versions: list[dict] = []   # history: one entry per rendered version
+        self.instructions: list[str] = []  # every revision request (and Look Lab pick), in order
         self.created = time.time()
         self.lock = threading.Lock()
 
@@ -69,7 +72,7 @@ class Job:
     def save(self):
         state = {k: getattr(self, k) for k in ("id", "status", "stage", "progress", "error", "clips", "music",
                                                "description", "options", "plan", "timeline_summary", "version",
-                                               "output", "versions", "created")}
+                                               "output", "versions", "created", "instructions")}
         state["logs"] = self.logs[-200:]
         (self.dir / "job.json").write_text(json.dumps(state, indent=1, default=str))
         if self.analysis is not None:
@@ -204,7 +207,7 @@ def run_analysis(job: Job):
 
 
 def run_render(job: Job, trigger: dict | None = None, ai_plan: dict | None = None, timings: dict | None = None):
-    opts = job.options
+    opts = {**job.options, **((job.plan or {}).get("options_applied") or {})}
     trigger = trigger or {"type": "new"}
     timings = dict(timings or {})
     job.set(0.52, "Building timeline")
@@ -228,7 +231,7 @@ def run_render(job: Job, trigger: dict | None = None, ai_plan: dict | None = Non
     t0 = time.time()
     res = render(tl, job.plan, job.music_info, str(out), str(job.dir / "tmp"), settings, face_detector(),
                  opts.get("smart_reframe", True), prog, job.log, metadata=mp4_metadata(job.plan, tl, job.version),
-                 auto_color=opts.get("auto_color", True))
+                 auto_color=opts.get("auto_color", True), grade_strength=float(opts.get("grade_strength", 1.0)))
     timings["render"] = round(time.time() - t0, 1)
     timings["total"] = round(sum(v for k, v in timings.items() if k != "total"), 1)
     job.output = str(out)
@@ -270,7 +273,8 @@ def _run(job: Job, mode: str, payload=None):
             job.save()
             job.set(0.46, "Planning the edit")
             t0 = time.time()
-            job.plan = plan_edit(job.analysis, job.music_info, job.options, job.description, job.log, plan_prog)
+            job.plan = plan_edit(job.analysis, job.music_info, {**job.options, "_revisions": list(job.instructions)},
+                                 job.description, job.log, plan_prog)
             timings["planning"] = round(time.time() - t0, 1)
         elif mode == "refine":
             job.set(0.46, "Revising the edit")
@@ -283,8 +287,10 @@ def _run(job: Job, mode: str, payload=None):
             except Exception as e:
                 job.log(f"learning: could not parse the request ({e})")
             t0 = time.time()
-            job.plan = refine_edit(job.plan, payload, job.analysis, job.music_info, job.options, job.description,
+            job.plan = refine_edit(job.plan, payload, job.analysis, job.music_info,
+                                   {**job.options, "_revisions": list(job.instructions)}, job.description,
                                    job.log, plan_prog)
+            job.instructions.append(payload)
             timings["planning"] = round(time.time() - t0, 1)
         elif mode == "plan":
             job.set(0.46, "Validating edited plan")
@@ -292,12 +298,20 @@ def _run(job: Job, mode: str, payload=None):
             old_look = (job.plan or {}).get("look")
             source = payload.get("_source")
             clean = {k: v for k, v in payload.items() if not k.startswith("_")}
+            kept = {k: clean[k] for k in ("directives", "options_applied") if k in clean}
+            if source == "look_lab" and clean.get("look") not in (None, "none"):
+                clean["grading"] = True  # picking a look is an explicit request to grade
             job.plan = sanitize_plan(clean, job.analysis, job.music_info, job.options)
+            job.plan.update(kept)
+            if job.options.get("grading") is False:  # the checkbox is the master switch
+                job.plan.update({"grading": False, "look": "none"})
             job.plan["planner"] = "Manual plan edit"
             job.plan["editor"] = {"provider": "manual", "label": "Manual plan edit (JSON)", "model": None,
                                   "based_on": prev_editor}
             if source == "look_lab":
                 trigger = {"type": "look", "feedback": f"Look Lab: {old_look} → {job.plan.get('look')}"}
+                if job.plan.get("grading") is not False:
+                    job.instructions.append(f"use the {job.plan.get('look')} look")
                 job.plan["editor"]["label"] = "Look Lab"
                 try:
                     get_learner().look_choice(job.id, job.version, old_look, job.plan.get("look"), job.description)

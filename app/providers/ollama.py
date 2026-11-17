@@ -24,6 +24,7 @@ from PIL import Image
 from ..analyze import select_shots
 from ..audio import CACHE
 from .. import config as C
+from ..clipfx import CLIP_EFFECTS
 from ..effects import CAPTION_STYLES, TEXT_STYLES
 from ..grading import look_names
 from ..playbook import (FORMAT_NOTE, PRINCIPLES, ROLE, clip_lines, music_lines, settings_lines,
@@ -85,7 +86,8 @@ Answer in JSON."""
 COMPACT_GUIDE = """Plan fields: each segment uses one shot from the shot log. seconds = how long it plays on screen. \
 part = which part of the shot to use (start, middle or end). speed = playback speed. camera = virtual camera move. \
 transition = how the segment enters (ignored for the first one). sound = true keeps the shot's own audio (speech, \
-laughter, ambience). text = on-screen text, or "" for none. Global fields: concept (your plan in 1-2 sentences, \
+laughter, ambience). text = on-screen text, or "" for none. effect = optional clip effect ("none" for most \
+shots). Global fields: concept (your plan in 1-2 sentences, \
 write it first), title, pace, look, grain, letterbox, caption_style."""
 
 PACE_LEN = {"fast": (0.6, 1.4), "medium": (1.2, 2.6), "slow": (2.2, 4.2)}
@@ -139,8 +141,10 @@ def compact_schema(shot_ids: list[str]) -> dict:
             "sound": {"type": "boolean"},
             "text": {"type": "string"},
             "text_style": {"type": "string", "enum": list(TEXT_STYLES)},
+            "effect": {"type": "string", "enum": list(CLIP_EFFECTS)},
         },
-        "required": ["shot", "seconds", "part", "speed", "camera", "transition", "sound", "text", "text_style"],
+        "required": ["shot", "seconds", "part", "speed", "camera", "transition", "sound", "text", "text_style",
+                     "effect"],
     }
     return {
         "type": "object",
@@ -425,7 +429,7 @@ def compact_to_raw(cp: dict, analysis: dict, music: dict | None) -> dict:
         segs.append({
             "shot_id": sh["id"], "start": round(st, 3), "end": round(st + src, 3), "speed": speed,
             "motion": s.get("camera", "none"), "transition_in": s.get("transition", "cut"),
-            "keep_audio": bool(s.get("sound", False)), "focus_x": fx,
+            "keep_audio": bool(s.get("sound", False)), "focus_x": fx, "effect": s.get("effect", "none"),
             "text": {"content": text[:60], "style": style, "position": pos} if text else None,
         })
     return {
@@ -433,7 +437,7 @@ def compact_to_raw(cp: dict, analysis: dict, music: dict | None) -> dict:
         "title": str(cp.get("title", "My reel"))[:80],
         "pace": cp.get("pace") if cp.get("pace") in PACE_LEN else "medium",
         "look": cp.get("look", "clean"),
-        "look_intensity": 0.9,
+        "look_intensity": 1.0,
         "grain": _GRAIN.get(cp.get("grain"), 0.15),
         "vignette": 0.3,
         "letterbox": bool(cp.get("letterbox", False)),
@@ -461,6 +465,7 @@ def full_to_compact(plan: dict, analysis: dict) -> dict:
         segs.append({"shot": s.get("shot_id"), "seconds": round((s["end"] - s["start"]) / sp, 2), "part": part,
                      "speed": sp, "camera": s.get("motion"), "transition": s.get("transition_in"),
                      "sound": s.get("keep_audio", False), "text": t.get("content", ""),
+                     "effect": s.get("effect", "none"),
                      "text_style": t.get("style", "bold")})
     g = plan.get("grain", 0)
     grain = "none" if g < 0.05 else "light" if g < 0.22 else "medium" if g < 0.4 else "heavy"

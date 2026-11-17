@@ -83,6 +83,7 @@ def build_timeline(plan: dict, analysis: dict, music: dict | None, options: dict
             "focus_x": s.get("focus_x", 0.5), "keep_audio": s.get("keep_audio", False), "text": s.get("text"),
             "shot_id": s.get("shot_id"),
             "color": (shot_idx.get(s.get("shot_id")) or {}).get("color"),
+            "effect": s.get("effect", "none"),
         })
     _clamp_transitions(segs)
     snapped = 0

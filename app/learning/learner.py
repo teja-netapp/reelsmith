@@ -22,24 +22,28 @@ import time
 import numpy as np
 
 from ..grading import FAMILIES, look_family, look_names, look_texture
+from ..transitions import REGISTRY
 from .features import CONTEXT_CROSSED, TRANSITION_GROUPS, category, label, plan_features, summarize
 from .preferences import parse
 from .reward import RewardModel
 from .store import Store
 
 PREFERRED_BY_CATEGORY = {
-    "travel": ["light_leak", "whip_right", "crossfade"], "hype": ["flash", "zoom_punch", "whip_left", "glitch"],
-    "romantic": ["crossfade", "light_leak", "blur_dissolve"], "vlog": ["crossfade"],
-    "sport": ["zoom_punch", "whip_left", "flash"], "food": ["slide_up", "crossfade", "whip_right"],
-    "nature": ["crossfade", "light_leak", "dip_to_black"], "city": ["whip_left", "glitch", "zoom_punch"],
-    "family": ["crossfade", "light_leak"], "product": ["zoom_punch", "slide_up", "whip_up"],
-    "general": ["crossfade", "whip_right", "light_leak"],
+    "travel": ["light_leak", "whip_right", "pull_in", "lens_flare", "push_left"],
+    "hype": ["zoom_flash", "zoom_punch", "shake_punch", "glitch_whip", "flash_blast", "spin"],
+    "romantic": ["crossfade", "light_leak", "blur_dissolve", "dip_to_white", "heart"],
+    "vlog": ["crossfade", "story_swipe", "slide_left"], "sport": ["zoom_punch", "whip_left", "shake", "speed_sweep"],
+    "food": ["slide_up", "scrapbook", "whip_right", "pull_in"], "nature": ["crossfade", "light_leak", "focus_blur",
+                                                                        "film_burn"],
+    "city": ["whip_left", "glitch", "rgb_split", "zoom_punch", "cube_3d"], "family": ["crossfade", "light_leak",
+                                                                                    "scrapbook", "paper_tear"],
+    "product": ["zoom_punch", "flip_3d", "slide_up", "pull_in"], "general": ["crossfade", "whip_right", "light_leak",
+                                                                           "pull_in"],
 }
-GROUP_DEFAULT = {"crossfade": "crossfade", "dip": "dip_to_black", "flash": "flash", "whip": "whip_right",
-                 "zoom_punch": "zoom_punch", "slide_up": "slide_up", "light_leak": "light_leak", "glitch": "glitch",
-                 "blur_dissolve": "blur_dissolve", "iris": "iris"}
-TR_DUR = {"crossfade": 0.5, "dip_to_black": 0.6, "flash": 0.25, "whip_left": 0.3, "whip_right": 0.3, "whip_up": 0.3,
-          "zoom_punch": 0.35, "slide_up": 0.4, "light_leak": 0.8, "glitch": 0.25, "blur_dissolve": 0.5, "iris": 0.5}
+GROUP_DEFAULT = {"basic": "pull_in", "camera": "zoom_punch", "light": "light_leak", "blur": "focus_blur",
+                 "glitch": "glitch", "distortion": "ripple", "slide": "push_left", "mask": "iris",
+                 "overlay": "story_swipe", "trending": "zoom_flash"}
+TR_DUR = {n: t.duration for n, t in REGISTRY.items()}
 
 
 def _group(tr: str) -> str | None:
@@ -332,13 +336,16 @@ class Learner:
                 s["end"] = round(s["start"] + out * 0.5, 3)
             return ("slow-motion on high-motion shots", q) if cands else None
 
+        locks = set(options.get("_locks") or [])  # dimensions your instructions fixed - never searched
         dims = [
             [lambda p: m_pace(p, 0.8), lambda p: m_pace(p, 1.25)],
+            [] if "transitions" in locks else
             [lambda p: m_trans(p, "restrained"), lambda p: m_trans(p, "richer"), lambda p: m_trans(p, "swap")],
+            [] if "look" in locks else
             [(lambda lk: (lambda p: m_look(p, lk)))(lk) for lk in (params.get("looks") or [])[:3]],
-            [lambda p: m_grain(p, True), lambda p: m_grain(p, False), lambda p: m_letterbox(p, True),
-             lambda p: m_letterbox(p, False)],
-            [m_slowmo],
+            ([] if "grain" in locks else [lambda p: m_grain(p, True), lambda p: m_grain(p, False)]) +
+            ([] if "letterbox" in locks else [lambda p: m_letterbox(p, True), lambda p: m_letterbox(p, False)]),
+            [] if "slowmo" in locks else [m_slowmo],
         ]
         best, best_t, applied = base, total(base), []
         tried = [(best_t, [], base)]
@@ -369,7 +376,7 @@ class Learner:
                 if near:
                     best_t, _, best = self._rng.choice(near)
                     explored = "a near-best variant"
-            if explored is None and self._rng.random() < 0.12:
+            if explored is None and "look" not in locks and self._rng.random() < 0.12:
                 seen = {look_family(e["summary"].get("look") or "clean") for e in self.store.edits(limit=500)
                         if e.get("category") == cat}
                 fresh = [lk for lk in look_names() if look_family(lk) not in seen and
@@ -382,6 +389,7 @@ class Learner:
                         if best_t - t < 0.35:
                             best, best_t, explored = cand, t, f"a look you haven't seen yet ({cand['look']})"
         best["learning"] = {
+            "locked": sorted(locks),
             "applied": _describe_diff(base, best), "predicted": round(best_t, 3), "baseline": round(base_s, 3),
             "explored": explored, "confidence": round(conf, 2), "candidates": len(tried),
             "house_style": prof["bullets"], "category": cat,

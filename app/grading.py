@@ -28,90 +28,176 @@ CUBE_SIZE = 33
 LUMA = np.array([0.2126, 0.7152, 0.0722])
 
 # ----------------------------------------------------------------------------------------------
-# Look library
+# Look library (CapCut-style presets, grouped by category)
 # hue angles in degrees (0 red, 30 orange/skin, 60 yellow, 120 green, 180 cyan, 210 sky, 240 blue,
-# 300 magenta). tints are (hue, amount). hue_adj bands: (center, width, hue_shift, sat_mult, lum_shift)
+# 300 magenta). tints are (hue, amount). hue_adj bands: (center, width, hue_shift, sat_mult, lum_shift).
+# curves: {"rgb"|"r"|"g"|"b": [(x, y), ...]} monotone tone curves (0..1). mix: 3x3 channel mixer (rows
+# sum to 1 keep neutrals neutral).
+# Every preset is measured (tests/test_grading.py): visibly strong (CIEDE2000 vs the original) and
+# distinct from every other preset.
 # ----------------------------------------------------------------------------------------------
 DEFAULTS = dict(temp=0.0, tint=0.0, exposure=0.0, contrast=1.0, pivot=0.45, toe=0.0, shoulder=0.0,
                 black=0.0, white=1.0, sat=1.0, vibrance=0.0, lift=(0, 0, 0), gamma=(1, 1, 1), gain=(1, 1, 1),
-                shadow_tint=(0, 0.0), highlight_tint=(0, 0.0), hue_adj=(), skin_protect=0.7,
-                mono=False, mono_mix=(0.30, 0.59, 0.11), mono_tone=(0, 0.0),
+                shadow_tint=(0, 0.0), highlight_tint=(0, 0.0), hue_adj=(), skin_protect=0.7, tint_skin_protect=0.6,
+                mono=False, mono_mix=(0.30, 0.59, 0.11), mono_tone=(0, 0.0), curves=None, mix=None,
                 halation=0.0, bloom=0.0, grain=0.0, vignette=0.0)
 
-LOOK_PARAMS: dict[str, dict] = {
-    "none": dict(),
-    "clean": dict(contrast=1.08, vibrance=0.15, sat=1.02, shoulder=0.15),
-    "vibrant": dict(contrast=1.08, sat=1.12, vibrance=0.35, shoulder=0.2),
-    "teal_orange": dict(temp=0.05, contrast=1.16, sat=1.05, vibrance=0.1, shoulder=0.25,
-                        shadow_tint=(195, 0.10), highlight_tint=(32, 0.08),
-                        hue_adj=((120, 40, 28, 0.8, -0.05), (210, 30, -6, 1.1, -0.04), (30, 18, 2, 1.06, 0.0))),
-    "kodak_2383": dict(contrast=1.3, pivot=0.42, toe=0.4, shoulder=0.3, sat=1.03,
-                       shadow_tint=(190, 0.07), highlight_tint=(38, 0.07),
-                       hue_adj=((120, 35, 16, 0.85, -0.06), (0, 25, 6, 1.05, -0.04)),
-                       halation=0.3, grain=0.28),
-    "warm_film": dict(temp=0.15, contrast=1.05, black=0.035, white=0.97, sat=0.92, shoulder=0.35,
-                      gamma=(1.0, 1.0, 0.97), highlight_tint=(40, 0.05), shadow_tint=(200, 0.04),
-                      halation=0.25, grain=0.25),
-    "fuji_eterna": dict(contrast=0.92, black=0.03, sat=0.82, temp=-0.03, tint=-0.05, shoulder=0.3,
-                        hue_adj=((120, 40, -10, 0.85, 0.0), (30, 25, -3, 0.92, 0.0)), grain=0.2),
-    "golden_hour": dict(temp=0.35, exposure=0.05, contrast=1.06, sat=1.12, vibrance=0.2,
-                        highlight_tint=(38, 0.10), shadow_tint=(20, 0.04), bloom=0.25),
-    "desert_heat": dict(temp=0.3, tint=0.05, contrast=1.12, sat=1.05, highlight_tint=(40, 0.08),
-                        hue_adj=((210, 40, -15, 0.7, 0.0),), bloom=0.15),
-    "high_key": dict(exposure=0.35, contrast=0.92, black=0.02, sat=0.9, vibrance=0.1, temp=0.02, shoulder=0.45,
-                     highlight_tint=(200, 0.02), bloom=0.2),
-    "matte_pastel": dict(exposure=0.1, black=0.1, white=0.95, contrast=0.88, sat=0.8,
-                         highlight_tint=(330, 0.04), shadow_tint=(210, 0.05)),
-    "moody": dict(exposure=-0.2, contrast=1.2, sat=0.72, temp=-0.08, black=0.02, shadow_tint=(205, 0.08),
-                  hue_adj=((120, 40, 20, 0.6, -0.1), (210, 40, 0, 0.8, -0.08)), vignette=0.5, grain=0.2),
-    "emerald_moody": dict(exposure=-0.15, contrast=1.15, sat=0.9, temp=-0.05, shadow_tint=(170, 0.08),
-                          hue_adj=((120, 45, 30, 0.95, -0.1), (60, 25, 25, 0.8, -0.05)), vignette=0.4, grain=0.15),
-    "cinematic_cool": dict(temp=-0.2, tint=0.05, contrast=1.18, sat=0.9, toe=0.2,
-                           shadow_tint=(215, 0.10), highlight_tint=(190, 0.03)),
-    "cool_blue": dict(temp=-0.25, sat=0.85, contrast=1.06, shadow_tint=(210, 0.06)),
-    "neon_night": dict(contrast=1.15, sat=1.2, vibrance=0.2, shadow_tint=(250, 0.10), highlight_tint=(320, 0.025),
-                       hue_adj=((300, 40, 0, 1.25, 0.05), (190, 30, 0, 1.2, 0.03)), bloom=0.35),
-    "cross_process": dict(contrast=1.2, sat=1.25, shadow_tint=(240, 0.12), highlight_tint=(70, 0.12),
-                          gamma=(1.05, 0.97, 1.1)),
-    "bleach_bypass": dict(sat=0.45, contrast=1.35, toe=0.25, shoulder=0.1, temp=-0.03, grain=0.2),
-    "vintage": dict(black=0.08, white=0.93, contrast=0.95, sat=0.78, temp=0.1, gamma=(1.0, 1.02, 0.95),
-                    shadow_tint=(175, 0.08), highlight_tint=(45, 0.10), grain=0.4, halation=0.2, vignette=0.35),
-    "noir": dict(mono=True, mono_mix=(0.35, 0.55, 0.10), contrast=1.38, toe=0.3, shoulder=0.2,
-                 vignette=0.45, grain=0.35),
-    "sepia": dict(mono=True, mono_tone=(35, 0.07), black=0.04, contrast=1.1, grain=0.3, vignette=0.4),
+# name: (label, category, description, params)
+_LOOKS: dict[str, tuple[str, str, str, dict]] = {
+    'none': ('Original', 'Life', 'no grade: original colours',
+        dict()),
+    # --- Life ------------------------------------------------------------------------------------
+    'clean': ('Natural', 'Life', 'natural polish: richer contrast and colour, true skin',
+        dict(contrast=1.16, vibrance=0.4, sat=1.04, temp=0.03, shoulder=0.2, curves={'rgb': [(0, 0), (0.25,
+             0.215), (0.75, 0.795), (1, 1)]})),
+    'fresh': ('Fresh', 'Life', 'crisp, bright and cool-clean: vivid blues and greens',
+        dict(exposure=0.24, temp=-0.3, contrast=1.14, vibrance=0.6, sat=1.1, shoulder=0.4, hue_adj=((210, 35,
+             -4, 1.45, 0.0), (120, 40, 6, 1.4, 0.05)))),
+    'sunny': ('Sunny', 'Life', 'warm daylight: bright, golden and happy',
+        dict(exposure=0.26, temp=0.42, tint=-0.06, contrast=1.04, sat=1.12, vibrance=0.25, shoulder=0.45,
+             highlight_tint=(55, 0.14), black=0.02)),
+    'food': ('Food', 'Life', 'appetising: warm, rich reds, oranges and creamy highlights',
+        dict(temp=0.3, tint=0.06, contrast=1.28, sat=1.28, vibrance=0.25, shoulder=0.25, exposure=-0.04,
+             toe=0.2, hue_adj=((15, 25, -2, 1.4, -0.02), (40, 20, -4, 1.3, 0.02), (120, 35, -6, 1.15, 0.0)))),
+    'portrait': ('Portrait', 'Life', 'flattering skin: soft contrast, warm glow, gentle pink highlights',
+        dict(temp=0.26, tint=0.12, exposure=0.12, contrast=0.86, black=0.06, sat=0.9, shoulder=0.45,
+             highlight_tint=(10, 0.1), hue_adj=((28, 18, -3, 0.88, 0.07),), bloom=0.15, skin_protect=0.0)),
+    # --- Vibrant ---------------------------------------------------------------------------------
+    'vibrant': ('Vivid', 'Vibrant', 'bright, colourful, social-first',
+        dict(contrast=1.14, sat=1.55, vibrance=0.9, shoulder=0.35, exposure=0.12, temp=0.08)),
+    'pop': ('Pop', 'Vibrant', 'maximum punch: deep blacks, saturated everything',
+        dict(contrast=1.5, toe=0.6, sat=1.6, vibrance=0.5, shoulder=0.2, exposure=-0.06, temp=-0.04,
+             curves={'rgb': [(0, 0), (0.2, 0.12), (0.8, 0.88), (1, 1)]})),
+    'tropical': ('Tropical', 'Vibrant', 'turquoise water, lush greens, warm skin',
+        dict(contrast=1.14, sat=1.22, vibrance=0.4, temp=0.08, exposure=0.06, hue_adj=((205, 30, -10, 1.2, 0.03),
+             (180, 25, -6, 1.45, 0.06), (120, 40, -16, 1.5, 0.04), (60, 25, -8, 1.25, 0.0)))),
+    'candy': ('Candy', 'Vibrant', 'pink-magenta sweetness, lifted and bright',
+        dict(tint_skin_protect=0.0, tint=0.42, exposure=0.12, black=0.06, contrast=1.0, sat=1.25, highlight_tint=(330, 0.16),
+             shadow_tint=(280, 0.1), shoulder=0.3)),
+    # --- Warm ------------------------------------------------------------------------------------
+    'golden_hour': ('Golden Hour', 'Warm', 'sunset warmth, glowing orange highlights',
+        dict(temp=0.72, exposure=0.08, contrast=1.08, sat=1.16, vibrance=0.2, shoulder=0.35, highlight_tint=(34,
+             0.2), shadow_tint=(15, 0.08), bloom=0.3)),
+    'desert_heat': ('Desert', 'Warm', 'sun-baked: orange earth, dusty teal skies',
+        dict(temp=0.6, tint=0.08, contrast=1.24, sat=1.0, highlight_tint=(38, 0.12), shadow_tint=(25, 0.1),
+             hue_adj=((210, 40, -28, 0.5, 0.03), (120, 40, -45, 0.55, 0.0)), bloom=0.15)),
+    'autumn': ('Autumn', 'Warm', 'fall colours: greens turned gold, rich reds',
+        dict(temp=0.34, contrast=1.16, sat=1.18, hue_adj=((120, 45, -50, 1.1, -0.02), (80, 30, -28, 1.3, 0.0),
+             (10, 25, 0, 1.3, -0.03)), shadow_tint=(20, 0.08))),
+    # --- Film ------------------------------------------------------------------------------------
+    'kodak_2383': ('Kodak 2383', 'Film', 'print film: dense contrast, cyan shadows, warm highlights, halation',
+        dict(temp=0.18, contrast=1.55, pivot=0.42, toe=0.6, shoulder=0.35, sat=0.9, shadow_tint=(195, 0.24),
+             highlight_tint=(40, 0.16), hue_adj=((120, 35, 30, 0.75, -0.1), (0, 25, 6, 1.12, -0.06)),
+             halation=0.35, grain=0.28)),
+    'portra': ('Portra', 'Film', 'Portra 400: warm creamy skin, pastel greens, soft contrast',
+        dict(temp=0.3, contrast=0.88, black=0.07, white=0.96, sat=0.84, shoulder=0.45, highlight_tint=(45, 0.1),
+             shadow_tint=(200, 0.06), hue_adj=((120, 40, -22, 0.55, 0.06), (210, 35, -14, 0.7, 0.05), (28, 18,
+             0, 1.08, 0.03)), grain=0.22)),
+    'fuji_eterna': ('Eterna', 'Film', 'Fuji Eterna cinema stock: low contrast, muted, green-cyan',
+        dict(contrast=0.8, black=0.07, sat=0.58, temp=-0.12, tint=-0.28, shoulder=0.4, shadow_tint=(170, 0.14),
+             hue_adj=((120, 40, 16, 0.75, 0.0), (30, 25, -3, 0.88, 0.0)), grain=0.2)),
+    'warm_film': ('Warm Film', 'Film', 'faded warm negative: soft blacks, amber cast, halation',
+        dict(temp=0.58, contrast=1.06, black=0.07, white=0.95, sat=0.85, shoulder=0.4, gamma=(1.0, 1.0, 0.9),
+             highlight_tint=(35, 0.14), shadow_tint=(15, 0.08), halation=0.3, grain=0.28)),
+    'cinestill': ('CineStill 800T', 'Film', 'tungsten night film: cool cast, red glow around lights',
+        dict(temp=-0.7, tint=0.08, contrast=1.18, sat=1.08, highlight_tint=(15, 0.14), shadow_tint=(195, 0.18),
+             hue_adj=((0, 30, 0, 1.35, 0.0),), halation=0.7, grain=0.3)),
+    # --- Movies ----------------------------------------------------------------------------------
+    'teal_orange': ('Teal & Orange', 'Movies', 'blockbuster: teal shadows and greens, warm skin and highlights',
+        dict(temp=0.1, contrast=1.24, sat=1.1, vibrance=0.1, shoulder=0.3, shadow_tint=(188, 0.32),
+             highlight_tint=(30, 0.2), hue_adj=((120, 45, 60, 0.7, -0.05), (210, 30, -16, 1.25, -0.05), (30, 18,
+             2, 1.15, 0.0)))),
+    'cinematic_cool': ('Blue Hour', 'Movies', 'cool cinematic night / blue hour',
+        dict(temp=-0.55, tint=-0.04, contrast=1.3, sat=0.85, toe=0.35, exposure=-0.06, shadow_tint=(195, 0.24),
+             highlight_tint=(190, 0.06))),
+    'matrix': ('Matrix', 'Movies', 'digital green cast, cold and hard',
+        dict(tint_skin_protect=0.0, tint=-0.7, temp=-0.3, contrast=1.3, sat=0.68, toe=0.3, mix=((0.8, 0.2, 0.0), (0.05, 0.95, 0.0),
+             (0.0, 0.25, 0.75)), shadow_tint=(150, 0.14))),
+    'storybook': ('Storybook', 'Movies', 'whimsical pastel: warm yellows and pinks, lifted, symmetrical-film feel',
+        dict(temp=0.3, tint=0.16, black=0.09, contrast=0.9, sat=1.1, highlight_tint=(55, 0.12),
+             shadow_tint=(340, 0.1), hue_adj=((0, 30, 8, 1.2, 0.05), (60, 25, -5, 1.25, 0.05), (120, 40, -24,
+             0.65, 0.04)))),
+    'thriller': ('Thriller', 'Movies', 'crime-drama: sickly yellow-green highs, teal shadows, desaturated',
+        dict(tint_skin_protect=0.0, sat=0.58, contrast=1.32, toe=0.3, temp=0.22, tint=-0.25, shadow_tint=(175, 0.16),
+             highlight_tint=(68, 0.2), exposure=-0.06)),
+    # --- Retro -----------------------------------------------------------------------------------
+    'vintage': ('70s', 'Retro', 'faded 70s print: lifted blacks, teal shadows, yellow highs, grain',
+        dict(black=0.15, white=0.92, contrast=0.9, sat=0.65, temp=0.3, tint=-0.1, gamma=(1.0, 1.02, 0.86),
+             shadow_tint=(175, 0.18), highlight_tint=(55, 0.22), grain=0.4, halation=0.2, vignette=0.35)),
+    'polaroid': ('Polaroid', 'Retro', 'instant film: cyan-green shadows, creamy warm highlights, faded',
+        dict(black=0.1, white=0.95, contrast=0.86, sat=0.8, exposure=0.1, temp=-0.08, curves={'r': [(0, 0.03),
+             (0.5, 0.5), (1, 0.98)], 'g': [(0, 0.09), (0.5, 0.52), (1, 0.97)], 'b': [(0, 0.2), (0.5, 0.5), (1,
+             0.86)]}, shadow_tint=(170, 0.14), highlight_tint=(40, 0.06), vignette=0.25)),
+    'retro_80s': ('80s', 'Retro', 'synthwave video: magenta highs, cyan shadows, soft and glowy',
+        dict(tint_skin_protect=0.0, black=0.08, contrast=1.05, sat=1.2, shadow_tint=(190, 0.24), highlight_tint=(315, 0.22), tint=0.16,
+             bloom=0.3, grain=0.15)),
+    'cross_process': ('Cross Process', 'Retro', 'cross-processed slide: blue shadows, yellow-green highs, punchy',
+        dict(contrast=1.25, sat=1.3, curves={'r': [(0, 0), (0.25, 0.18), (0.75, 0.85), (1, 1)], 'g': [(0, 0.02),
+             (0.5, 0.55), (1, 1)], 'b': [(0, 0.2), (0.5, 0.45), (1, 0.7)]})),
+    'sepia': ('Sepia', 'Retro', 'warm sepia monochrome, aged print',
+        dict(mono=True, mono_tone=(35, 0.09), black=0.05, white=0.95, contrast=1.1, grain=0.3, vignette=0.4)),
+    # --- Night -----------------------------------------------------------------------------------
+    'neon_night': ('Neon', 'Night', 'night-city neon: indigo shadows, magenta and cyan pop, glow',
+        dict(tint_skin_protect=0.0, contrast=1.22, sat=1.35, vibrance=0.2, temp=-0.2, shadow_tint=(255, 0.24), highlight_tint=(320,
+             0.06), hue_adj=((300, 40, 0, 1.5, 0.06), (190, 30, 0, 1.45, 0.04)), bloom=0.4)),
+    'cyberpunk': ('Cyberpunk', 'Night', 'teal-magenta split, electric and saturated',
+        dict(tint_skin_protect=0.0, contrast=1.26, sat=1.32, shadow_tint=(185, 0.3), highlight_tint=(305, 0.24), tint=0.18,
+             hue_adj=((30, 20, -10, 0.9, 0.0),), bloom=0.3, skin_protect=0.3)),
+    'midnight': ('Midnight', 'Night', 'deep blue night, dark and cold',
+        dict(tint_skin_protect=0.0, exposure=-0.5, temp=-0.85, tint=0.05, contrast=1.25, sat=0.7, toe=0.45, shadow_tint=(235, 0.2),
+             vignette=0.45)),
+    # --- Mood ------------------------------------------------------------------------------------
+    'moody': ('Moody', 'Mood', 'dark, desaturated, cold shadows',
+        dict(exposure=-0.38, contrast=1.36, sat=0.52, temp=-0.2, black=0.02, toe=0.35, shadow_tint=(205, 0.18),
+             hue_adj=((120, 40, 25, 0.45, -0.14), (210, 40, 0, 0.65, -0.12)), vignette=0.5, grain=0.2)),
+    'emerald_moody': ('Emerald', 'Mood', 'dark forest: deep emerald greens, moody',
+        dict(exposure=-0.22, contrast=1.24, sat=0.95, temp=-0.1, tint=-0.18, shadow_tint=(160, 0.2),
+             hue_adj=((120, 45, 40, 1.2, -0.16), (60, 25, 35, 0.85, -0.1)), vignette=0.4, grain=0.15)),
+    'bleach_bypass': ('Bleach Bypass', 'Mood', 'desaturated, harsh silvery contrast',
+        dict(sat=0.3, contrast=1.62, toe=0.4, shoulder=0.1, temp=-0.08, grain=0.2)),
+    'cool_blue': ('Nordic', 'Mood', 'clean, cold, desaturated Scandinavian blues',
+        dict(temp=-0.7, sat=0.7, contrast=1.05, exposure=0.08, black=0.04, shadow_tint=(210, 0.16),
+             hue_adj=((30, 20, 0, 0.8, 0.0),))),
+    # --- Soft ------------------------------------------------------------------------------------
+    'high_key': ('Airy', 'Soft', 'bright and airy: lifted, soft highlights, gentle colour',
+        dict(exposure=0.62, contrast=0.8, black=0.05, sat=0.74, vibrance=0.1, temp=0.04, shoulder=0.6,
+             highlight_tint=(200, 0.04), bloom=0.25)),
+    'matte_pastel': ('Pastel', 'Soft', 'matte pastel: lifted blacks, soft pink and mint tones',
+        dict(exposure=0.14, black=0.16, white=0.94, contrast=0.82, sat=0.66, highlight_tint=(330, 0.11),
+             shadow_tint=(165, 0.12))),
+    'dreamy': ('Dreamy', 'Soft', 'soft glow, lavender highlights, lifted and hazy',
+        dict(exposure=0.16, black=0.1, contrast=0.82, sat=0.92, tint=0.16, highlight_tint=(285, 0.14),
+             shadow_tint=(240, 0.09), bloom=0.55, halation=0.15)),
+    # --- B&W -------------------------------------------------------------------------------------
+    'noir': ('Noir', 'B&W', 'high-contrast black & white',
+        dict(mono=True, mono_mix=(0.35, 0.55, 0.1), contrast=1.45, toe=0.35, shoulder=0.2, vignette=0.45,
+             grain=0.35)),
+    'mono_soft': ('Soft B&W', 'B&W', 'gentle black & white, lifted and silky',
+        dict(mono=True, mono_mix=(0.3, 0.59, 0.11), contrast=0.85, black=0.08, white=0.96, exposure=0.1,
+             grain=0.15)),
+    'silver': ('Silver', 'B&W', 'bright, cool-toned silver monochrome',
+        dict(mono=True, mono_mix=(0.25, 0.6, 0.15), mono_tone=(210, 0.06), exposure=0.2, contrast=1.15,
+             shoulder=0.4)),
 }
-
-LOOK_DESCRIPTIONS_BUILTIN = {
-    "none": "no grade (balance only)",
-    "clean": "natural Rec.709 polish, gentle contrast",
-    "vibrant": "bright, colorful, social-first",
-    "teal_orange": "blockbuster: teal shadows & greens, warm skin & highlights",
-    "kodak_2383": "Kodak print film: rich contrast, warm highlights, cyan-leaning greens, halation",
-    "warm_film": "soft warm film negative, faded blacks, halation",
-    "fuji_eterna": "Fuji Eterna cinema stock: soft, low contrast, muted, slightly green",
-    "golden_hour": "sunset warmth, glowing highlights",
-    "desert_heat": "hot, dry, sun-baked with muted teal skies",
-    "high_key": "bright & airy, lifted, soft highlights",
-    "matte_pastel": "matte pastel, lifted blacks, soft pink/blue tones",
-    "moody": "dark, desaturated, cold shadows",
-    "emerald_moody": "dark forest/emerald greens, moody",
-    "cinematic_cool": "cool blockbuster night/blue hour",
-    "cool_blue": "clean cold nordic tones",
-    "neon_night": "night-city neon: indigo shadows, magenta & cyan pop, glow",
-    "cross_process": "cross-processed: blue shadows, yellow-green highlights, punchy",
-    "bleach_bypass": "bleach bypass: desaturated, harsh silvery contrast",
-    "vintage": "faded 70s print: lifted blacks, teal shadows, yellow highs, grain",
-    "noir": "high-contrast black & white",
-    "sepia": "warm sepia monochrome",
-}
+LOOK_PARAMS: dict[str, dict] = {k: v[3] for k, v in _LOOKS.items()}
+LOOK_LABELS: dict[str, str] = {k: v[0] for k, v in _LOOKS.items()}
+LOOK_CATEGORY: dict[str, str] = {k: v[1] for k, v in _LOOKS.items()}
+LOOK_DESCRIPTIONS_BUILTIN: dict[str, str] = {k: v[2] for k, v in _LOOKS.items()}
+LOOK_CATEGORIES = ["Life", "Vibrant", "Warm", "Film", "Movies", "Retro", "Night", "Mood", "Soft", "B&W"]
 
 # families help the learner generalize ("you like warm looks for travel")
 LOOK_FAMILY = {
-    "none": "clean", "clean": "clean", "vibrant": "vibrant", "teal_orange": "cinematic", "kodak_2383": "film",
-    "warm_film": "film", "fuji_eterna": "film", "golden_hour": "warm", "desert_heat": "warm", "high_key": "bright",
-    "matte_pastel": "bright", "moody": "dark", "emerald_moody": "dark", "cinematic_cool": "cool", "cool_blue": "cool",
-    "neon_night": "neon", "cross_process": "vibrant", "bleach_bypass": "dark", "vintage": "film", "noir": "mono",
-    "sepia": "mono",
+    "none": "clean", "clean": "clean", "portrait": "clean", "fresh": "bright", "sunny": "warm", "food": "warm",
+    "vibrant": "vibrant", "pop": "vibrant", "tropical": "vibrant", "candy": "vibrant",
+    "golden_hour": "warm", "desert_heat": "warm", "autumn": "warm",
+    "kodak_2383": "film", "portra": "film", "fuji_eterna": "film", "warm_film": "film", "cinestill": "film",
+    "teal_orange": "cinematic", "cinematic_cool": "cool", "matrix": "cinematic", "storybook": "cinematic",
+    "thriller": "cinematic",
+    "vintage": "film", "polaroid": "film", "retro_80s": "vibrant", "cross_process": "vibrant", "sepia": "mono",
+    "neon_night": "neon", "cyberpunk": "neon", "midnight": "cool",
+    "moody": "dark", "emerald_moody": "dark", "bleach_bypass": "dark", "cool_blue": "cool",
+    "high_key": "bright", "matte_pastel": "bright", "dreamy": "bright",
+    "noir": "mono", "mono_soft": "mono", "silver": "mono",
 }
 FAMILIES = sorted(set(LOOK_FAMILY.values()) | {"custom"})
 
@@ -138,6 +224,16 @@ def look_descriptions() -> dict[str, str]:
     for name, p in user_luts().items():
         d[name] = f"your LUT '{p.stem}'"
     return d
+
+
+def look_label(name: str) -> str:
+    if name.startswith("lut:"):
+        return name[4:].replace("_", " ")
+    return LOOK_LABELS.get(name, name.replace("_", " ").title())
+
+
+def look_category(name: str) -> str:
+    return "Your LUTs" if name.startswith("lut:") else LOOK_CATEGORY.get(name, "Life")
 
 
 def look_family(name: str) -> str:
@@ -242,6 +338,41 @@ def _scurve(x, c, pivot):
     return np.where(x < pivot, lo, hi)
 
 
+def _gamut_fit(L: np.ndarray, chroma: np.ndarray) -> np.ndarray:
+    """L + chroma, with chroma scaled down (never hue-shifted) just enough to stay inside 0..1:
+    strong saturation without the flat, posterised patches that hard clipping makes."""
+    Lc = np.clip(L, 0, 1)[:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        up = np.where(chroma > 1e-9, (1 - Lc) / chroma, np.inf)
+        dn = np.where(chroma < -1e-9, (0 - Lc) / chroma, np.inf)
+    t = np.minimum(np.min(up, 1), np.min(dn, 1))
+    t = np.clip(t, 0, 1)
+    # soft knee: start easing at 85% of the boundary
+    soft = np.where(t < 1, t, 1.0)
+    return Lc + chroma * soft[:, None]
+
+
+def _curve(x: np.ndarray, pts) -> np.ndarray:
+    """Monotone cubic (Fritsch-Carlson) tone curve through control points [(x, y), ...]."""
+    P = np.array(sorted(pts), float)
+    xs, ys = P[:, 0], P[:, 1]
+    if len(xs) == 2:
+        return np.interp(np.clip(x, 0, 1), xs, ys)
+    h = np.diff(xs)
+    d = np.diff(ys) / h
+    m = np.zeros(len(xs))
+    m[0], m[-1] = d[0], d[-1]
+    for i in range(1, len(xs) - 1):
+        m[i] = 0.0 if d[i - 1] * d[i] <= 0 else 3 * (h[i - 1] + h[i]) / ((2 * h[i] + h[i - 1]) / d[i - 1] +
+                                                                           (h[i] + 2 * h[i - 1]) / d[i])
+    xc = np.clip(x, 0, 1)
+    k = np.clip(np.searchsorted(xs, xc) - 1, 0, len(xs) - 2)
+    t = (xc - xs[k]) / h[k]
+    t2, t3 = t * t, t * t * t
+    return ((2 * t3 - 3 * t2 + 1) * ys[k] + (t3 - 2 * t2 + t) * h[k] * m[k] + (-2 * t3 + 3 * t2) * ys[k + 1]
+            + (t3 - t2) * h[k] * m[k + 1])
+
+
 def _shoulder(x: np.ndarray, s: float) -> np.ndarray:
     """Soft-clip above a knee: y = k + a(1 - e^{-(x-k)/a}), with a solved so the brightest value maps to 1.
     Identity when nothing exceeds 1, so it only ever recovers blown highlights."""
@@ -274,9 +405,12 @@ def apply_look_params(rgb: np.ndarray, p: dict) -> np.ndarray:
     p = {**DEFAULTS, **p}
     lin = np.power(np.clip(rgb, 0, 1), 2.2)
     # white balance & exposure in linear light
-    t, ti = p["temp"], p["tint"]
-    lin = lin * np.array([1 + 0.12 * t, 1 - 0.08 * ti, 1 - 0.12 * t]) * (2.0 ** p["exposure"])
+    t, ti = p["temp"], p["tint"]   # temp +1 = very warm (~+3000 K feel), tint +1 = magenta, -1 = green
+    wb = np.array([1 + 0.32 * t + 0.06 * ti, 1 - 0.22 * ti, 1 - 0.38 * t + 0.06 * ti])
+    lin = lin * (wb / float(wb @ LUMA)) * (2.0 ** p["exposure"])
     x = np.power(np.clip(lin, 0, None), 1 / 2.2)
+    if p["mix"] is not None:  # channel mixer (rows sum to 1 keep neutrals neutral)
+        x = x @ np.asarray(p["mix"], float).T
     # highlight shoulder: values pushed past white roll off smoothly instead of clipping (slope 1 at
     # the knee, so mid-tones are untouched); then contrast S-curve, toe and fade
     x = _shoulder(x, p["shoulder"])
@@ -284,22 +418,34 @@ def apply_look_params(rgb: np.ndarray, p: dict) -> np.ndarray:
     if p["toe"] > 0:
         b = 0.05 * p["toe"]
         x = np.clip((x - b) / (1 - b), 0, 1)
+    if p["curves"]:  # tone curves: master first, then per channel (how most app filters are built)
+        cv = p["curves"]
+        if "rgb" in cv:
+            x = _curve(x, cv["rgb"])
+        for i, ch in enumerate("rgb"):
+            if ch in cv:
+                x[:, i] = _curve(x[:, i], cv[ch])
     x = p["black"] + (p["white"] - p["black"]) * x
     # CDL-style lift / gamma / gain per channel
     lift, gam, gain = np.array(p["lift"], float), np.array(p["gamma"], float), np.array(p["gain"], float)
     x = gain * (x + lift * (1 - x))
     x = np.power(np.clip(x, 0, None), 1 / np.maximum(gam, 1e-3))
-    # split toning
+    # split toning (skin keeps most of its natural hue unless the look is meant to be stylised)
     L = x @ LUMA
+    keep = 1.0
+    if p["tint_skin_protect"] and (p["shadow_tint"][1] or p["highlight_tint"][1]):
+        hsv0 = rgb_to_hsv(np.clip(x, 0, 1))
+        skin0 = np.exp(-0.5 * (((hsv0[:, 0] - 22 + 180) % 360 - 180) / 16) ** 2) * _smooth(0.12, 0.35, hsv0[:, 1])
+        keep = (1 - p["tint_skin_protect"] * skin0)[:, None]
     for (hue, amt), w in ((p["shadow_tint"], _smooth(0.55, 0.0, L)), (p["highlight_tint"], _smooth(0.45, 1.0, L))):
         if amt:
-            x = x + amt * w[:, None] * _hue_rgb(hue)[None, :]
+            x = x + amt * w[:, None] * _hue_rgb(hue)[None, :] * keep
     # saturation + vibrance (protects already-saturated colors)
     L = x @ LUMA
     chroma = x - L[:, None]
     s_cur = np.clip(x.max(1) - x.min(1), 0, 1)
     fac = p["sat"] * (1 + p["vibrance"] * (1 - s_cur))
-    x = L[:, None] + chroma * fac[:, None]
+    x = _gamut_fit(L, chroma * fac[:, None])
     # hue-selective adjustments with skin protection
     if p["hue_adj"]:
         hsv = rgb_to_hsv(np.clip(x, 0, 1))
@@ -357,7 +503,7 @@ def build_cube(look: str, intensity: float = 1.0, correction: dict | None = None
         graded = apply_look_params(base, LOOK_PARAMS[look])
     else:
         graded = base
-    k = float(np.clip(intensity, 0, 1.2))
+    k = float(np.clip(intensity, 0, 1.5))
     out = np.clip(base + k * (graded - base), 0, 1)
     return out.reshape(n, n, n, 3)
 

@@ -12,6 +12,7 @@ import re
 import numpy as np
 
 from ..grading import FAMILIES, look_family
+from ..transitions import by_category
 
 CATEGORIES = {
     "travel": ("travel", "trip", "vacation", "holiday", "city tour", "explore", "journey", "wander", "beach", "island"),
@@ -25,11 +26,10 @@ CATEGORIES = {
     "family": ("family", "kids", "baby", "birthday", "friends", "dog", "cat", "pet"),
     "product": ("product", "brand", "launch", "unboxing", "promo", "ad ", "commercial"),
 }
-TRANSITION_GROUPS = {
-    "crossfade": ("crossfade",), "dip": ("dip_to_black",), "flash": ("flash",),
-    "whip": ("whip_left", "whip_right", "whip_up"), "zoom_punch": ("zoom_punch",), "slide_up": ("slide_up",),
-    "light_leak": ("light_leak",), "glitch": ("glitch",), "blur_dissolve": ("blur_dissolve",), "iris": ("iris",),
-}
+# transitions are learned per CapCut-style category (basic, camera, light, blur, glitch, ...)
+TRANSITION_GROUPS = {cat: tuple(names) for cat, names in by_category().items()}
+EFFECT_GROUPS = {"beat": ("zoom_pulse", "shake", "flash_beat"), "retro": ("vhs", "film_dust"),
+                 "glow": ("glow", "light_leak"), "glitch": ("rgb_split",)}
 MOTION_GROUPS = {
     "static": ("none",), "push": ("push_in", "pull_out", "punch_in"), "drift": ("drift_left", "drift_right", "rise",
                                                                               "ken_burns"),
@@ -49,7 +49,10 @@ FEATURE_LABELS = {
     "fade_out": "fade-out",
 }
 for _g in TRANSITION_GROUPS:
-    FEATURE_LABELS[f"t_{_g}"] = f"{_g.replace('_', ' ')} transitions"
+    FEATURE_LABELS[f"t_{_g}"] = f"{_g} transitions"
+FEATURE_LABELS.update({"fx_frac": "clip effects", "e_beat": "beat-synced effects (zoom pulse, shake, flash)",
+                       "e_retro": "retro effects (VHS, film dust)", "e_glow": "glow / light-leak effects",
+                       "e_glitch": "RGB-split effect"})
 for _g in MOTION_GROUPS:
     FEATURE_LABELS[f"m_{_g}"] = {"static": "locked-off shots", "push": "push-in/pull-out moves",
                                  "drift": "slow drifts/pans", "handheld": "handheld shake"}[_g]
@@ -107,6 +110,10 @@ def plan_features(plan: dict, analysis: dict, options: dict, brief: str = "") ->
     }
     for g, names in TRANSITION_GROUPS.items():
         f[f"t_{g}"] = float(np.mean([t in names for t in trs])) if trs else 0.0
+    effs = [s.get("effect", "none") or "none" for s in segs]
+    f["fx_frac"] = float(np.mean([e != "none" for e in effs]))
+    for g, names in EFFECT_GROUPS.items():
+        f[f"e_{g}"] = float(np.mean([e in names for e in effs]))
     mos = [s.get("motion", "none") for s in segs]
     for g, names in MOTION_GROUPS.items():
         f[f"m_{g}"] = float(np.mean([m in names for m in mos]))

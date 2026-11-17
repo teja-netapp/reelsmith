@@ -63,7 +63,8 @@ def test_learning_improves_edits_for_simulated_user(media):
     assert "faster" in " ".join(prof["bullets"]).lower()                       # hidden taste: fast cuts
     assert any(look_family(lk) in ("warm", "film") for lk in prof["looks"])    # warm / film looks
     assert learner.model.w.get("t_glitch", 0) <= 0                             # never learned to like glitch
-    assert learner._wf("lf_cool", "travel") < 0                                # dislikes cool looks
+    warm = max(learner._wf("lf_warm", "travel"), learner._wf("lf_film", "travel"))
+    assert learner._wf("lf_cool", "travel") <= 0 < warm                       # prefers warm/film over cool looks
     learner.reset()
 
 

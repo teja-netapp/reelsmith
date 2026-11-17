@@ -33,6 +33,7 @@
 
       <h2>3 · Describe the reel</h2>
       <textarea id="desc" rows="5" placeholder="e.g. Moody cinematic travel reel of Lisbon. Open on the tram shot, slow-mo the waves, warm film look, title &quot;LISBON&quot;, end on the sunset."></textarea>
+      <div class="rules hidden" id="descRules"></div>
       <div class="chips" id="examples"></div>
 
       <h2>4 · Options</h2>
@@ -50,11 +51,17 @@
       </div>
       <div class="hint" id="aiHint"></div>
       <div class="toggles">
-        <label class="tog"><input type="checkbox" id="optAuto" checked><span></span><div><b>Auto-pick best moments</b><small>Claude watches every shot and chooses the strongest</small></div></label>
+        <label class="tog"><input type="checkbox" id="optAuto" checked><span></span><div><b>Auto-pick best moments</b><small>The AI editor watches every shot and chooses the strongest</small></div></label>
         <label class="tog"><input type="checkbox" id="optBeat" checked><span></span><div><b>Beat-synced cuts</b><small>Cuts snap to the music's beats</small></div></label>
         <label class="tog"><input type="checkbox" id="optCap"><span></span><div><b>Auto-captions</b><small>Word-by-word captions from speech</small></div></label>
         <label class="tog"><input type="checkbox" id="optReframe" checked><span></span><div><b>Smart 9:16 reframing</b><small>Tracks faces &amp; subjects when cropping</small></div></label>
-        <label class="tog"><input type="checkbox" id="optColor" checked><span></span><div><b>Auto color match</b><small>Balances every shot's white balance &amp; exposure so cuts don't jump, before the look</small></div></label>
+      </div>
+      <div class="grade-box" id="gradeBox">
+        <label class="tog"><input type="checkbox" id="optGrade" checked><span></span><div><b>Color grading</b><small id="gradeHint">Applies a look (filter) to your footage. Turn off to keep the original colours. Only transitions &amp; effects are added.</small></div></label>
+        <div class="grade-sub" id="gradeSub">
+          <div class="slider"><span class="label">Strength</span><input type="range" id="optStrength" min="0" max="150" step="5" value="100"><span class="val" id="strengthVal">100%</span></div>
+          <label class="tog"><input type="checkbox" id="optColor" checked><span></span><div><b>Auto color match</b><small>Balances white balance &amp; exposure shot to shot so cuts don't jump</small></div></label>
+        </div>
       </div>
       <div class="row">
         <span class="label">Quality</span>
@@ -104,10 +111,16 @@
             <p class="reason" id="planReason"></p>
             <div class="stats" id="planStats"></div>
             <div class="timeline" id="timeline"></div>
+            <div class="muted small tl-hint">Click a transition (▾) or a shot's <b>fx</b> badge to change it. Previews use your own shots.</div>
           </div>
 
           <div class="card hidden" id="lookCard">
             <h3>Look Lab <span class="muted small">click a grade to re-render this edit with it. Your picks teach the taste model</span></h3>
+            <div class="ll-bar">
+              <label class="tog mini"><input type="checkbox" id="llGrade" checked><span></span><div><b>Color grading</b><small id="llHint">off = original colours</small></div></label>
+              <div class="slider"><span class="label">Strength</span><input type="range" id="llStrength" min="0" max="150" step="5" value="100"><span class="val" id="llStrengthVal">100%</span></div>
+              <button class="ghost small hidden" id="llApply">Apply strength</button>
+            </div>
             <div class="looks" id="lookGrid"></div>
           </div>
 
@@ -121,6 +134,10 @@
               <span class="stars" id="stars"></span>
               <span class="small" id="rateMsg"></span>
             </div>
+            <section class="rep-rules hidden" id="repRulesSec">
+              <h4>Your instructions <span class="muted small">followed as hard rules, whatever the AI suggested</span></h4>
+              <div id="repRules"></div>
+            </section>
             <div class="rep-grid">
               <section><h4>Editor</h4><div id="repEditor"></div></section>
               <section><h4>Brief &amp; settings</h4><div id="repBrief"></div></section>
@@ -144,6 +161,7 @@
           <div class="card hidden" id="refineCard">
             <h3>Revise with words</h3>
             <textarea id="feedback" rows="3" placeholder="Make it punchier, open on the drone shot, add more slow-mo, warmer colours…"></textarea>
+            <div class="rules hidden" id="fbRules"></div>
             <div class="chips" id="refineChips"></div>
             <button class="primary" id="refineBtn">↻ Revise &amp; re-render</button>
             <details class="adv">
@@ -268,6 +286,20 @@
         </div>
         <div class="msg" id="dMsg"></div>
       </section>
+    </div>
+  </div>
+
+  <!-- per-cut transition / per-shot effect picker -->
+  <div class="pop hidden" id="pop" role="dialog" aria-label="Pick a transition">
+    <div class="pop-head">
+      <div><b id="popTitle">Transition</b><div class="muted small" id="popSub"></div></div>
+      <button class="ghost small" id="popClose" aria-label="Close">✕</button>
+    </div>
+    <div class="pop-tabs" id="popTabs"></div>
+    <div class="pop-grid" id="popGrid"></div>
+    <div class="pop-foot">
+      <label class="small"><input type="checkbox" id="popAll"> <span id="popAllLabel">use it for every cut</span></label>
+      <span class="muted small">hover to preview on your footage · click to apply &amp; re-render</span>
     </div>
   </div>
 

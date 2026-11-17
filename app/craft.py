@@ -239,7 +239,7 @@ def polish(plan: dict, analysis: dict, options: dict, level: str = "light", desc
 
         # 4. hook: strongest image first - unless the user said how to open, or wants clips in order
         told_opening = re.search(r"\b(open|start|begin)\w*\s+(on|with)\b|\bfirst shot\b", (description or "").lower())
-        if len(segs) > 2 and not told_opening and options.get("auto_pick", True):
+        if len(segs) > 2 and not told_opening and options.get("auto_pick", True) and not options.get("_keep_order"):
             vals = [_hook_value(s, shots) for s in segs]
             best = max(range(len(segs) - 1), key=lambda i: vals[i])  # never steal the ending
             if vals[0] < vals[best] - 0.15:

@@ -16,6 +16,7 @@ import random
 import re
 import time
 
+from . import directives as D
 from .craft import fmt_t, polish
 from .learning import get_learner
 from .effects import CAPTION_STYLES, TEXT_POSITIONS, TEXT_STYLES
@@ -23,6 +24,7 @@ from .grading import look_names, look_texture
 from .playbook import words_in as _words_in
 from .providers import chain_with_skips
 from .reframe import MOTIONS
+from .clipfx import CLIP_EFFECTS
 from .transitions import TRANSITIONS
 
 HEURISTIC_LABEL = "Built-in rules (no AI)"
@@ -32,7 +34,7 @@ def _noop(*_a, **_k):
     return None
 
 
-def _finalize(raw, analysis, music, options, description, level, editor):
+def _finalize(raw, analysis, music, options, description, level, editor, rules: "D.Directives | None" = None):
     plan = sanitize_plan(raw, analysis, music, options)
     warns = plan.get("warnings", [])
     learner = get_learner()
@@ -48,13 +50,23 @@ def _finalize(raw, analysis, music, options, description, level, editor):
         except Exception as e:  # never lose an edit because of the learner
             learning = {"error": f"{type(e).__name__}: {e}"}
     final = sanitize_plan(plan, analysis, music, options)
+    enforced = []
+    if rules is not None:  # your explicit instructions win over the AI, the assistant editor and the learner
+        enforced = D.enforce(final, rules, analysis, options)
+        kept = {k: final[k] for k in ("directives", "grading") if k in final}
+        w0 = final.get("warnings", [])
+        final = sanitize_plan(final, analysis, music, options)
+        final.update(kept)
+        final["warnings"] = list(dict.fromkeys(w0 + final.get("warnings", [])))
+        final["options_applied"] = {k: options[k] for k in ("captions", "target_duration", "auto_pick", "auto_color")
+                                    if k in options}
     if learning:
         final["learning"] = learning
     final["pace"] = pace
     final["planner"] = editor["label"]
     final["editor"] = {**editor, "craft_level": level}
     final["craft_notes"] = notes
-    final["craft_changes"] = changes
+    final["craft_changes"] = changes + [c for c in enforced if c not in changes]
     w = list(dict.fromkeys(warns + final.get("warnings", [])))
     if w:
         final["warnings"] = w
@@ -89,23 +101,44 @@ def _run_chain(kind, call, options, log, progress, fallback_raw, level_fallback=
     return raw, level_fallback, editor
 
 
+def instructions(description: str, options: dict, extra: str | None = None) -> "D.Directives":
+    """Hard rules from the brief + every earlier revision (+ this one) + the option checkboxes."""
+    revs = list(options.get("_revisions") or []) + ([extra] if extra else [])
+    return D.collect(description, revs, options, look_names())
+
+
+def _with_rules(text: str, rules) -> str:
+    block = rules.prompt_block()
+    return (text or "") + ("\n\n" + block if block else "")
+
+
 def plan_edit(analysis, music, options, description, log=print, progress=None) -> dict:
     progress = progress or _noop
+    rules = instructions(description, options)
+    options = D.apply_options(options, rules)
+    for r in rules.rules.values():
+        log(f"instruction: {r['label']}  ({r['source']})")
     raw, level, editor = _run_chain(
-        "plan", lambda p: p.plan(analysis, music, options, description, log, progress), options, log, progress,
-        lambda: heuristic_raw(analysis, music, options, description))
-    return _finalize(raw, analysis, music, options, description, level, editor)
+        "plan", lambda p: p.plan(analysis, music, options, _with_rules(description, rules), log, progress), options,
+        log, progress, lambda: heuristic_raw(analysis, music, options, description))
+    return _finalize(raw, analysis, music, options, description, level, editor, rules)
 
 
 def refine_edit(prev_plan, feedback, analysis, music, options, description, log=print, progress=None) -> dict:
     progress = progress or _noop
-    prev = {k: v for k, v in prev_plan.items() if not k.startswith("_") and k not in ("editor", "craft_changes")}
+    rules = instructions(description, options, feedback)
+    options = D.apply_options(options, rules)
+    for r in rules.rules.values():
+        log(f"instruction: {r['label']}  ({r['source']})")
+    prev = {k: v for k, v in prev_plan.items() if not k.startswith("_") and k not in ("editor", "craft_changes",
+                                                                                     "directives", "options_applied")}
     raw, level, editor = _run_chain(
-        "refine", lambda p: p.refine(prev, feedback, analysis, music, options, description, log, progress),
+        "refine", lambda p: p.refine(prev, _with_rules(feedback, rules), analysis, music, options, description, log,
+                                     progress),
         options, log, progress,
         lambda: heuristic_raw(analysis, music, options, description + " " + feedback, seed=len(feedback) * 7 + 1))
     editor["feedback"] = feedback
-    return _finalize(raw, analysis, music, options, description + " " + feedback, level, editor)
+    return _finalize(raw, analysis, music, options, description + " " + feedback, level, editor, rules)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -142,12 +175,13 @@ def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) 
         "reasoning": str(raw.get("reasoning", ""))[:1500],
         "title": str(raw.get("title", "Untitled reel"))[:80],
         "look": raw.get("look") if raw.get("look") in LOOKS else "clean",
-        "look_intensity": _f(raw.get("look_intensity"), 0.9, 0, 1.2),
+        "look_intensity": _f(raw.get("look_intensity"), 1.0, 0, 1.5),
         "grain": _f(raw.get("grain"), 0.15, 0, 1),
         "vignette": _f(raw.get("vignette"), 0.3, 0, 1),
         "letterbox": bool(raw.get("letterbox", False)),
         "halation": _f(raw.get("halation"), look_texture(raw.get("look") if raw.get("look") in LOOKS else "clean")["halation"], 0, 1),
         "bloom": _f(raw.get("bloom"), look_texture(raw.get("look") if raw.get("look") in LOOKS else "clean")["bloom"], 0, 1),
+        "grading": raw.get("grading", True) is not False,
         "fade_in": bool(raw.get("fade_in", True)),
         "fade_out": bool(raw.get("fade_out", True)),
         "music_start": _f(raw.get("music_start"), music["suggested_start"] if music else 0, 0),
@@ -213,6 +247,7 @@ def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) 
             "transition_duration": round(td, 3),
             "focus_x": round(_f(fx, 0.5, 0, 1), 3),
             "keep_audio": bool(s.get("keep_audio", False)),
+            "effect": s.get("effect") if s.get("effect") in CLIP_EFFECTS else "none",
             "text": text,
         })
     if not plan["segments"]:
@@ -262,6 +297,25 @@ def sanitize_plan(raw: dict, analysis: dict, music: dict | None, options: dict) 
 # ----------------------------------------------------------------------------------------------
 _LOOK_WORDS = [
     (("sepia",), "sepia"),
+    (("cyberpunk", "synthwave", "blade runner"), "cyberpunk"),
+    (("80s", "eighties", "retro wave"), "retro_80s"),
+    (("polaroid", "instant film"), "polaroid"),
+    (("portra",), "portra"),
+    (("cinestill", "800t", "tungsten"), "cinestill"),
+    (("matrix", "hacker"), "matrix"),
+    (("thriller", "crime", "fincher", "detective"), "thriller"),
+    (("wes anderson", "storybook", "whimsical"), "storybook"),
+    (("tropical", "beach", "island", "maldives", "bali", "goa"), "tropical"),
+    (("autumn", "fall colo", "foliage"), "autumn"),
+    (("food", "recipe", "cooking", "restaurant", "brunch", "cafe"), "food"),
+    (("portrait", "wedding", "bride", "skin"), "portrait"),
+    (("dreamy", "ethereal", "fairytale"), "dreamy"),
+    (("midnight", "late night"), "midnight"),
+    (("pop", "punchy colo"), "pop"),
+    (("candy", "pink", "barbie"), "candy"),
+    (("fresh", "crisp", "clean and bright"), "fresh"),
+    (("sunny", "summer day", "daylight"), "sunny"),
+    (("soft black and white", "soft b&w"), "mono_soft"),
     (("black and white", "b&w", "noir", "monochrome"), "noir"),
     (("bleach",), "bleach_bypass"),
     (("kodak", "film print", "2383"), "kodak_2383"),
@@ -339,9 +393,10 @@ def heuristic_raw(analysis, music, options, description, seed=0) -> dict:
     acc = sum(min(seg_len, s["duration"]) for s in chosen)
     stretch = min(2.5, target / acc) if acc > 0 and acc < target * 0.95 else 1.0
     palettes = {
-        "fast": ["cut", "cut", "whip_left", "cut", "flash", "cut", "zoom_punch", "cut", "glitch", "whip_right"],
-        "slow": ["crossfade", "cut", "light_leak", "cut", "blur_dissolve", "cut", "dip_to_black"],
-        "mid": ["cut", "crossfade", "cut", "whip_right", "cut", "light_leak", "cut", "zoom_punch"],
+        "fast": ["cut", "cut", "whip_left", "cut", "zoom_flash", "cut", "shake_punch", "cut", "glitch_whip", "cut",
+                 "spin", "cut", "flash_blast"],
+        "slow": ["crossfade", "cut", "light_leak", "cut", "focus_blur", "cut", "film_burn", "cut", "dip_to_white"],
+        "mid": ["cut", "pull_in", "cut", "whip_right", "cut", "light_leak", "cut", "push_left", "cut", "flip_3d"],
     }[pace]
     motions = ["push_in", "drift_left", "pull_out", "drift_right", "ken_burns", "handheld"]
     if pace == "fast":
@@ -364,6 +419,7 @@ def heuristic_raw(analysis, music, options, description, seed=0) -> dict:
             "motion": motions[i % len(motions)], "transition_in": tr,
             "transition_duration": TRANSITIONS[tr][0], "focus_x": s.get("focus_x") or 0.5,
             "keep_audio": (not music) or (talky and has_speech),
+            "effect": ("zoom_pulse" if (pace == "fast" and music and i % 4 == 2) else "none"),
         })
     titles = re.findall(r'["“]([^"”]{1,40})["”]', description or "")
     if titles and segs:

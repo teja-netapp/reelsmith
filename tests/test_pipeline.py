@@ -44,13 +44,15 @@ def test_offline_rules_end_to_end(media):
 def test_local_ollama_editor(media, fake_ollama):
     from app.pipeline import run_sync
 
+    start = len(fake_ollama)  # the fake server's log is shared by the whole test session
     job = run_sync([media["land"], media["track"]], media["music"], "fast hype reel", {**OPTS, "planner": "ollama"})
     assert job.status == "done", job.error
     p = job.plan
     assert p["planner"].startswith("Local AI")
     assert p["title"] == "Fake Local Edit"
-    n_logged = sum(1 for r in fake_ollama if any(m.get("images") for m in r["messages"]))
-    assert n_logged == len(job.analysis["shots"])          # every shot was logged by the vision model
+    n_logged = sum(1 for r in fake_ollama[start:] if any(m.get("images") for m in r["messages"]))
+    ed = p["editor"]                                        # every shot was logged by the vision model (or cached)
+    assert n_logged == ed["shots_logged"] and ed["shots_logged"] + ed["shots_cached"] == len(job.analysis["shots"])
     plan_req = [r for r in fake_ollama if not any(m.get("images") for m in r["messages"])][-1]
     assert "Editing principles" in plan_req["messages"][0]["content"]  # same playbook as the cloud editors
     assert plan_req["format"]["properties"]["segments"]["items"]["properties"]["shot"]["enum"]

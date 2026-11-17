@@ -53,14 +53,37 @@ You can see all of it in **⚙ Settings → Learning**: what it learned, how sur
 
 > **Honest expectation:** an 8B local model won't out-think Claude on a complex brief. The two-pass story → edit planning, three-frame shot logging and your learned taste close much of the gap, and for **your** preferences specifically, the taste model can beat any general model. Rate your first 10–20 reels to train it.
 
+## Your instructions are rules
+
+Some sentences in your brief or a revision are instructions, not inspiration: "don't touch the colour grading, just add transitions", "no text", "only cuts", "keep the clips in order", "no slow-mo", "title 'GOA 24'", "15 second reel", "add whip pans and light leaks", "no glitches". Reelsmith detects them as you type and shows them as chips under the box. They are enforced on the final edit, whatever the AI suggested. The report's **Your instructions** box lists each rule, the sentence it came from, and anything that had to be fixed. Later instructions win.
+
 ## Color
 
 - **Shot matching (on by default):** every shot's white balance and exposure is matched to the rest of the reel before the look, so cuts don't jump between color temperatures. Only near-neutral pixels are measured, so grass or sky can't fool it.
-- **21 film-style looks:** each one is a full grade baked into a 3D LUT and applied by FFmpeg. Grades use filmic curves, split toning, hue-selective adjustments with skin protection, and monochrome mixes. Includes Kodak 2383, Fuji Eterna, teal & orange, bleach bypass, cross process, matte pastel, high key, neon night, noir, sepia and more.
+- **Color grading switch:** turn it off to keep your footage's original colours. Only transitions, effects, text and captions are added: no LUT and no shot matching, so the pixels match the source. **Strength** (0–150%) scales any look.
+- **40 CapCut-style presets in 10 categories:**
+  - **Life:** Natural, Fresh, Sunny, Food, Portrait.
+  - **Vibrant:** Vivid, Pop, Tropical, Candy.
+  - **Warm:** Golden Hour, Desert, Autumn.
+  - **Film:** Kodak 2383, Portra, Eterna, Warm Film, CineStill 800T.
+  - **Movies:** Teal & Orange, Blue Hour, Matrix, Storybook, Thriller.
+  - **Retro:** 70s, Polaroid, 80s, Cross Process, Sepia.
+  - **Night:** Neon, Cyberpunk, Midnight.
+  - **Mood:** Moody, Emerald, Bleach Bypass, Nordic.
+  - **Soft:** Airy, Pastel, Dreamy.
+  - **B&W:** Noir, Soft B&W, Silver.
+
+  Each one is baked into a 3D LUT that FFmpeg applies. Every preset is measured in tests: it must be clearly visible (CIEDE2000 against the original), distinct from every other preset, and keep skin tones natural on the natural looks.
 - **Texture:** halation (the red film glow around highlights), bloom, grain and vignette.
 - **HDR iPhone video:** HLG and Dolby Vision/PQ clips are tone-mapped to SDR, instead of looking flat and washed out.
 - **Your own LUTs:** put `.cube` files in `assets/luts/` and they appear as looks.
-- **Look Lab:** every look previewed on a frame of your reel. Click one to re-render.
+- **Look Lab:** every look previewed on a frame of your reel, grouped by category. Click one to re-render.
+
+## Transitions & effects
+
+- **74 transitions in CapCut's categories:** Basic, Camera, Light, Blur, Glitch, Distortion, Slide, Mask, Overlay & social, and Trending. Examples: Mix, Black Fade, White Flash, Pull In/Out, whip pans, 3D flip, cube, light leaks, film burn, Flash Blast, chromatic blur, RGB split, liquid, fisheye, Screen Swap, split-screen push, heart, star, paper tear, film strip, Ribs Collage, zoom flash.
+- **Clip effects**, synced to the music's beats: zoom pulse, shake, beat flash and RGB split; also VHS, film dust, glow and light leak.
+- **Pick them yourself:** in the timeline, click a cut (▾) to choose its transition, or a shot's **fx** badge to choose its effect. Hover to preview it on your own shots; tick "use it for every cut" to apply one everywhere.
 
 ## See exactly how each reel was made
 
@@ -110,7 +133,7 @@ Every push runs the test suite on GitHub Actions (`.github/workflows/ci.yml`). I
 clips ─► ANALYSE ─► PLAN (AI editor) ─► CRAFT PASS ─► TIMELINE ─► RENDER ─► reel.mp4
          │            │                   │              │            │
          │            │                   │              │            ├─ smart 9:16 crop path (faces → saliency/motion)
-         │            │                   │              │            ├─ camera moves, 12 transitions, 10 looks
+         │            │                   │              │            ├─ camera moves, 74 transitions, 40 looks, clip fx
          │            │                   │              │            ├─ grain, vignette, letterbox, titles, captions
          │            │                   │              │            └─ music + original sound, ducked under speech
          │            │                   │              └─ frame-exact cuts snapped to the beats

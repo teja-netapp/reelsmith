@@ -11,7 +11,7 @@ import time
 
 from . import __version__
 from .craft import fmt_t
-from .grading import look_descriptions, look_family
+from .grading import look_category, look_descriptions, look_family, look_label
 
 TRIGGER_LABELS = {"new": "New reel", "refine": "Revision", "plan": "Manual plan edit", "look": "Look Lab"}
 
@@ -57,7 +57,7 @@ def build_report(job, tl: dict, plan: dict, settings, render_res: dict, trigger:
     shots = {s["id"]: s for s in analysis.get("all_shots", [])}
     shots.update({s["id"]: s for s in analysis.get("shots", [])})
     music = job.music_info
-    opts = job.options
+    opts = {**job.options, **(plan.get("options_applied") or {})}
     smart = opts.get("smart_reframe", True)
 
     segs = []
@@ -95,6 +95,7 @@ def build_report(job, tl: dict, plan: dict, settings, render_res: dict, trigger:
             "captions_words": s.get("caption_words", 0),
             "beat_adjust_s": s.get("beat_delta_s"),
             "color_match": _color_desc(s.get("color_correction")),
+            "effect": s.get("effect", "none"),
             "quality_score": sh.get("score"),
         })
 
@@ -132,8 +133,11 @@ def build_report(job, tl: dict, plan: dict, settings, render_res: dict, trigger:
         "pace": plan.get("pace"),
         "finishing": {
             "look": plan.get("look"), "look_description": look_descriptions().get(plan.get("look"), ""),
+            "look_label": look_label(plan.get("look") or "none"), "look_category": look_category(plan.get("look") or "none"),
             "look_family": look_family(plan.get("look")), "halation": plan.get("halation"), "bloom": plan.get("bloom"),
-            "auto_color": opts.get("auto_color", True),
+            "auto_color": opts.get("auto_color", True) and plan.get("grading", True) is not False,
+            "grading": plan.get("grading", True) is not False,
+            "grade_strength": opts.get("grade_strength", 1.0),
             "look_intensity": plan.get("look_intensity"), "grain": plan.get("grain"), "vignette": plan.get("vignette"),
             "letterbox": plan.get("letterbox"), "fade_in": plan.get("fade_in"), "fade_out": plan.get("fade_out"),
             "captions": {"style": plan.get("caption_style"), "words": len(tl.get("caption_words", []))}
@@ -151,7 +155,7 @@ def build_report(job, tl: dict, plan: dict, settings, render_res: dict, trigger:
         "segments": segs,
         "changes": {
             "validation": plan.get("warnings", []),
-            "assistant_editor": plan.get("craft_changes", []),
+            "assistant_editor": [c for c in plan.get("craft_changes", []) if c.get("rule") != "your instructions"],
             "assistant_editor_level": ed.get("craft_level"),
             "timeline": dropped_tr,
             "beat_sync": beat_summary,
@@ -163,6 +167,11 @@ def build_report(job, tl: dict, plan: dict, settings, render_res: dict, trigger:
             "render_seconds": render_res.get("render_seconds"), "file_mb": round(size / 1e6, 1) if size else None,
         },
         "learning": plan.get("learning"),
+        "instructions": {
+            "rules": (plan.get("directives") or {}).get("rules", []),
+            "enforced": (plan.get("directives") or {}).get("enforced", []),
+            "raw_color": bool((plan.get("directives") or {}).get("raw_color")),
+        },
         "timings_s": timings,
         "files": {"video": os.path.basename(output_path)},
     }
@@ -225,8 +234,22 @@ def report_markdown(r: dict) -> str:
                            for c in r["footage"]] + [""]
     if r.get("concept"):
         L += ["## Editor's concept", r["concept"], ""]
+    ins = r.get("instructions") or {}
+    if ins.get("rules"):
+        L += ["## Your instructions (enforced as hard rules)"]
+        L += [f"- {x['label']}  _({x['source']})_" for x in ins["rules"]]
+        if ins.get("enforced"):
+            L += ["", "What had to be changed to obey them:"] + [f"- {c['change']}" for c in ins["enforced"]]
+        else:
+            L += ["", "The editor's plan already obeyed them - nothing had to be changed."]
+        L.append("")
+    look_line = ("- Colour: **untouched** - colour grading off, original pixels (no LUT, no shot matching)"
+                 if not f.get("grading", True) else
+                 f"- Look: **{f.get('look_label') or f['look']}** ({f.get('look_category', '')}: {f['look_description']}), "
+                 f"intensity {f['look_intensity']:.2f}"
+                 + (f" × strength {f.get('grade_strength', 1):.0%}" if f.get("grade_strength", 1) != 1 else ""))
     L += ["## Look & sound",
-          f"- Look: **{f['look']}** ({f['look_description']}), intensity {f['look_intensity']:.2f}",
+          look_line,
           f"- Shot matching {'on' if f.get('auto_color', True) else 'off'} · halation {f.get('halation') or 0:.2f} · bloom {f.get('bloom') or 0:.2f}",
           f"- Grain {f['grain']:.2f} · vignette {f['vignette']:.2f} · letterbox {'yes' if f['letterbox'] else 'no'} · "
           f"fade in {'yes' if f['fade_in'] else 'no'} · fade out {'yes' if f['fade_out'] else 'no'}"]
@@ -250,6 +273,8 @@ def report_markdown(r: dict) -> str:
             extras.append(f"{g['captions_words']} caption words")
         if g["beat_adjust_s"]:
             extras.append(f"beat {g['beat_adjust_s']:+.2f} s")
+        if g.get("effect") and g["effect"] != "none":
+            extras.append(f"effect {g['effect']}")
         if g.get("color_match") and g["color_match"] != "matched (no change needed)":
             extras.append(f"color: {g['color_match']}")
         if g.get("what"):

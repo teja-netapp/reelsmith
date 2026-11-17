@@ -10,9 +10,20 @@ import base64
 import json
 
 from .effects import CAPTION_STYLES, TEXT_POSITIONS, TEXT_STYLES
-from .grading import look_descriptions, look_names
+from .grading import LOOK_CATEGORIES, look_category, look_descriptions, look_label, look_names
+
+
+def _looks_by_category() -> str:
+    d = look_descriptions()
+    rows = []
+    for cat in LOOK_CATEGORIES + ["Your LUTs"]:
+        names = [n for n in look_names() if look_category(n) == cat and n != "none"]
+        if names:
+            rows.append(f"  {cat}: " + "; ".join(f"{n} ({look_label(n)}: {d.get(n, '')})" for n in names))
+    return "\n".join(rows)
 from .reframe import MOTIONS
-from .transitions import TRANSITIONS
+from .clipfx import CLIP_EFFECTS
+from .transitions import CATEGORY_LABELS, REGISTRY, TRANSITIONS, by_category
 
 ROLE = ("You are Reelsmith, a senior short-form video editor and colorist who cuts scroll-stopping Instagram "
         "Reels. You receive a creative brief, a log of the user's footage and optional music analysis, and you "
@@ -20,6 +31,16 @@ ROLE = ("You are Reelsmith, a senior short-form video editor and colorist who cu
 
 FORMAT_NOTE = ("Output format: vertical 9:16, 1080x1920, 30 fps. The renderer reframes horizontal footage "
                "automatically with subject tracking.")
+
+def _catalogue() -> str:
+    lines = []
+    for cat, names in by_category().items():
+        items = ", ".join(f"{n}({REGISTRY[n].energy})" for n in names)
+        lines.append(f"  {CATEGORY_LABELS[cat]}: {items}")
+    return "\n".join(lines)
+
+
+TRANSITION_CATALOGUE = _catalogue()
 
 PRINCIPLES = f"""Editing principles:
 - Hook: the first 1-1.5 s must be the most striking image or moment. No slow, empty openings.
@@ -32,9 +53,19 @@ direction across cuts, and follow any order the brief asks for ("open on...", "e
 - Speed: 1.0 normal. 0.5 slow motion suits high-motion shots and high-fps sources. 1.5-2 for time-lapse energy. \
 Speed ramp = one continuous moment split into consecutive segments with different speeds joined by a cut.
 - Transitions: use 'cut' for most edits; stylised transitions land harder when rare (at most ~1 in 4 edits) and \
-must match the mood: {json.dumps({k: v[1] for k, v in TRANSITIONS.items()})}
+must match the mood. Energy 1 = subtle, 3 = high-energy (beat drops, hype). Catalogue by category:
+{TRANSITION_CATALOGUE}
+  Mood guide: calm/romantic/travel -> basic, blur, light (light_leak, film_burn), mask; hype/sport/party -> camera \
+(zoom_punch, whips, shake, spin), glitch, trending, flash; tech/city -> glitch, slide; social/vlog -> slide, overlay \
+(story_swipe, scrapbook, paper_tear).
+- Clip effects (optional, per segment, sparingly - 0-3 per reel): {json.dumps(CLIP_EFFECTS)}. Beat-synced effects \
+(zoom_pulse, shake, flash_beat) suit drops and hype moments.
 - Camera motion per segment: {json.dumps(MOTIONS)}. Avoid identical motion on consecutive segments.
-- Looks (each is a full film-style grade; shots are color-matched automatically first): {json.dumps(look_descriptions())}. Grain suits film/vintage looks; letterbox suits 'cinematic' briefs.
+- Looks (strong, CapCut-style colour presets; shots are colour-matched automatically first), by category:
+{_looks_by_category()}
+  look_intensity 1.0 = the preset as designed (use it by default); 0.6-0.8 only when the brief asks for subtle colour;
+  up to 1.3 for a bold stylised reel. Use look "none" (= original colours) when the user doesn't want grading.
+  Grain suits film/vintage looks; letterbox suits 'cinematic' briefs.
 - Text: optional, max ~6 words, only when it adds value or the brief asks for it. cinematic_title for an opening \
 title / place / theme; bold for punchy hooks; subtitle for a quiet line; kicker for small labels.
 - Audio: when music is present it plays under everything. Keep the original sound on segments where it matters \
@@ -63,7 +94,7 @@ PLAN_SCHEMA = {
                       "description": "2-4 sentences: the creative concept, the hook, structure and pacing."},
         "title": {"type": "string", "description": "Short working title for the reel."},
         "look": {"type": "string", "enum": look_names()},
-        "look_intensity": {"type": "number", "minimum": 0, "maximum": 1.2},
+        "look_intensity": {"type": "number", "minimum": 0, "maximum": 1.5},
         "grain": {"type": "number", "minimum": 0, "maximum": 1, "description": "film grain amount, 0 = none"},
         "vignette": {"type": "number", "minimum": 0, "maximum": 1},
         "letterbox": {"type": "boolean", "description": "cinematic black bars top and bottom"},
@@ -87,6 +118,8 @@ PLAN_SCHEMA = {
                     "motion": {"type": "string", "enum": list(MOTIONS)},
                     "transition_in": {"type": "string", "enum": list(TRANSITIONS)},
                     "transition_duration": {"type": "number", "minimum": 0, "maximum": 1.2},
+                    "effect": {"type": "string", "enum": list(CLIP_EFFECTS),
+                               "description": "optional clip effect over this segment ('none' for most)"},
                     "focus_x": {"type": "number", "minimum": 0, "maximum": 1,
                                 "description": "horizontal position of the main subject in the source frame"},
                     "keep_audio": {"type": "boolean", "description": "play this shot's original sound"},

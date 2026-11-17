@@ -33,7 +33,7 @@ def hidden_utility(plan, analysis, options):
     fam = look_family(plan.get("look"))
     u = 2.0 * f["pace_short"] - 1.0 * f["avg_len"]
     u += {"warm": 1.2, "film": 0.9, "cinematic": 0.3, "cool": -1.0, "mono": -0.8, "neon": -0.6}.get(fam, 0.0)
-    u -= 2.5 * f["t_glitch"] + 1.5 * f["t_flash"]
+    u -= 2.5 * f["t_glitch"] + 1.5 * f["t_light"]
     u += 0.8 if f["grain"] >= 0.2 else -0.3
     return u
 
@@ -48,7 +48,7 @@ def user_feedback(plan, analysis, options):
         wants.append("warmer")
     if f["t_glitch"] > 0:
         wants.append("no glitch")
-    if f["t_flash"] > 0:
+    if f["t_light"] > 0:
         wants.append("no flash")
     if f["grain"] < 0.2:
         wants.append("more grain")

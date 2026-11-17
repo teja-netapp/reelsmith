@@ -71,9 +71,20 @@ class MediaInfo:
     sar_filter: str | None = None  # filter to square pixels if needed
     hdr: str | None = None         # "hlg" / "pq" when the clip is HDR
     hdr_filter: str | None = None  # tone-mapping filter applied first when decoding
+    matrix: str | None = None      # YUV matrix the file was encoded with (bt709 / bt601 / bt2020), if tagged
+    range: str | None = None       # "tv" (limited) or "pc" (full)
 
     def pre_filters(self) -> list[str]:
         return [f for f in (self.hdr_filter, self.sar_filter) if f]
+
+    def color_in(self) -> str:
+        """swscale options to turn this file's YUV into RGB exactly the way players show it.
+        Untagged HD is BT.709 (what QuickTime / browsers / Instagram assume), untagged SD is BT.601."""
+        if self.hdr:  # the tone-map already produced BT.709 limited range
+            return "in_color_matrix=bt709:in_range=tv"
+        m = self.matrix or ("bt709" if max(self.width or 0, self.height or 0) >= 1200 or
+                            min(self.width or 0, self.height or 0) >= 700 else "bt601")
+        return f"in_color_matrix={m}:in_range={self.range or 'tv'}"
 
     def to_dict(self):
         return {
@@ -87,6 +98,8 @@ class MediaInfo:
             "sar_filter": self.sar_filter,
             "hdr": self.hdr,
             "hdr_filter": self.hdr_filter,
+            "matrix": self.matrix,
+            "range": self.range,
         }
 
     @classmethod
@@ -140,6 +153,11 @@ def probe(path: str) -> MediaInfo:
         mi.width, mi.height = w, h
         fps = _ratio(v.get("avg_frame_rate"), 0.0) or _ratio(v.get("r_frame_rate"), 30.0)
         mi.fps = fps if 1 < fps < 241 else 30.0
+        cs = (v.get("color_space") or "").lower()
+        mi.matrix = {"bt709": "bt709", "smpte170m": "bt601", "bt470bg": "bt601", "fcc": "fcc",
+                     "bt2020nc": "bt2020", "bt2020c": "bt2020", "smpte240m": "smpte240m"}.get(cs)
+        rng = (v.get("color_range") or "").lower()
+        mi.range = "pc" if (rng in ("pc", "jpeg") or str(v.get("pix_fmt", "")).startswith("yuvj")) else "tv"
         trc = (v.get("color_transfer") or "").lower()
         if trc in ("arib-std-b67", "smpte2084"):
             mi.hdr = "hlg" if trc == "arib-std-b67" else "pq"
@@ -170,6 +188,7 @@ class FrameReader:
         pre_filters: list[str] | None = None,
         post_filters: list[str] | None = None,
         cwd: str | None = None,
+        color_in: str | None = None,
     ):
         self.w, self.h = int(out_w), int(out_h)
         vf: list[str] = list(pre_filters or [])   # HDR tone-map, square pixels
@@ -178,7 +197,10 @@ class FrameReader:
         if crop:
             cw, ch, cx, cy = crop
             vf.append(f"crop={int(cw)}:{int(ch)}:{int(cx)}:{int(cy)}")
-        vf.append(f"scale={self.w}:{self.h}:flags={scale_flags}")
+        # resize + YUV->RGB in one accurate step (default swscale rounding shifts colours by 2-3 levels)
+        vf.append(f"scale={self.w}:{self.h}:flags={scale_flags}+accurate_rnd+full_chroma_int"
+                  + (f":{color_in}" if color_in else ""))
+        vf.append("format=bgr24")
         vf += list(post_filters or [])            # e.g. lut3d color grade (file relative to cwd)
         if abs(speed - 1.0) > 1e-3:
             vf.append(f"setpts=(PTS-STARTPTS)/{speed:.5f}")
@@ -247,7 +269,10 @@ class FrameWriter:
             cmd += ["-b:v", "12M", "-profile:v", "high"]
         else:
             cmd += ["-q:v", "3"]
-        cmd += ["-pix_fmt", "yuv420p", "-r", str(fps), "-movflags", "+faststart", path]
+        # exact RGB->YUV (BT.709, limited range) and tag it, so every player decodes the colours we made
+        cmd += ["-vf", "scale=out_color_matrix=bt709:out_range=tv:flags=accurate_rnd+full_chroma_int,format=yuv420p",
+                "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
+                "-pix_fmt", "yuv420p", "-r", str(fps), "-movflags", "+faststart", path]
         self._err = tempfile.TemporaryFile()
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=self._err)
         self.shape = (h, w, 3)

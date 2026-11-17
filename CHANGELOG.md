@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.0: your instructions are rules, 74 CapCut-style transitions, much stronger filters
+- **Your instructions are now hard rules.** Reelsmith reads your brief and every revision, and turns instructions into rules that the AI, the assistant editor and the taste model can't override.
+  - **What it understands:** "don't touch the colour grading", "no text", "only cuts", "keep the clips in order", "no slow-mo", "title 'GOA 24'", "15 second reel", "add whip pans and light leaks", "no glitches", and more.
+  - **How it applies them:**
+    - The AI is told the rules explicitly.
+    - The learner and assistant editor leave those settings alone.
+    - Anything the AI still gets wrong is fixed before rendering.
+  - **Where you see them:** detected rules show live as chips under the brief and the revision box. The report has a **Your instructions** box listing each rule, the sentence it came from, and what had to be fixed.
+  - **Precedence:** later instructions win, so "use the Portra look" in a revision overrides "no grading" in the brief.
+- **Color grading switch.** **Off** keeps your footage's original colours: only transitions, effects, text and captions are added. There is no LUT and no shot matching, and the pixels match the source to codec precision; a test proves it. A **Strength** slider (0–150%) is available in Options and in Look Lab.
+- **Colour fidelity in every render.** Decoding and encoding now use accurate rounding and full chroma precision, and output is tagged BT.709, so players show the colours as intended. Previously renders came out 2–3 levels darker.
+- **40 strong colour presets in 10 categories:** Life, Vibrant, Warm, Film, Movies, Retro, Night, Mood, Soft, B&W.
+  - **New presets:** Fresh, Sunny, Food, Portrait, Pop, Tropical, Candy, Autumn, Portra, CineStill 800T, Matrix, Storybook, Thriller, Polaroid, 80s, Cyberpunk, Midnight, Soft B&W, Silver.
+  - **Engine:** adds tone curves, a channel mixer, gamut-aware saturation (no posterised clipping) and skin-tone protection for split toning.
+  - **Measured strength:** each preset is checked with CIEDE2000 on a ColorChecker. Median strength rose from ΔE ≈ 5 ("barely visible") to ≈ 9.5. Every preset is at least ΔE 4.5 from every other one, and skin stays skin on natural looks.
+  - **Look Lab:** grouped by category.
+- **74 transitions in CapCut's categories:**
+  - **Basic:** Mix, Black Fade, White Flash, Pull In/Out, Wipes, Barn Door.
+  - **Camera:** Zoom Switch, Whip Pans in 4 directions, Shake, Rotate, 3D Flip, Cube, Speed Sweep.
+  - **Light:** light leak, lens flare, film burn, glow, Heatwave Flash, Flash Blast.
+  - **Blur:** directional, focus, chromatic, zoom, spin.
+  - **Glitch:** RGB split, static, Color Glitch, scanlines, pixelate.
+  - **Distortion:** liquid, fisheye, wave, ripple, twist, stretch.
+  - **Slide:** push and slide in every direction, diagonal, Screen Swap, split-screen push.
+  - **Mask:** iris, heart, star, diamond, blinds, clock wipe, line wipe.
+  - **Overlay & social:** paper tear, film strip, scrapbook, story swipe, Ribs Collage.
+  - **Trending:** zoom flash, spin zoom, glitch whip, shake punch.
+- **Clip effects**, beat-synced to your music: zoom pulse, shake, beat flash, RGB split, plus VHS, film dust, glow and light leak.
+- **Per-cut transition picker and per-shot effect picker.** Click a cut (▾) or a shot's **fx** badge in the timeline. Previews play on *your own shots* when you hover. You can apply one choice to every cut.
+
 ## 0.5.0: a local editor that learns your taste, and a new color engine
 - **Learning loop (on by default).**
   - **Signals:** every ★ rating, download, Look Lab pick and revision request ("faster, warmer, no glitch") trains a taste model: a small reward model learned online from your preferences.

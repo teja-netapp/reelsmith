@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 
 from .audio import mix_audio
+from .clipfx import ClipFX
 from .effects import CaptionTrack, FinishingPass, TextOverlay, fade
 from .grading import cube_file, look_texture, match_shots
 from .reframe import CropPath, FaceDetector, compute_crop_path, motion_transform
@@ -87,7 +88,8 @@ def _segment_frames(seg: dict, idx: int, st: RenderSettings, face_det: FaceDetec
     if lut:  # (lut file name, directory): graded by FFmpeg's lut3d while decoding - fast, 10-bit-safe math
         post, cwd = [f"lut3d=file={lut[0]}:interp=tetrahedral"], lut[1]
     reader = FrameReader(info.path, seg["src_in"], src_dur, dec_w, dec_h, crop=(bw, bh, bx0, by0), speed=speed,
-                         fps=fps, src_fps=info.fps, pre_filters=info.pre_filters(), post_filters=post, cwd=cwd)
+                         fps=fps, src_fps=info.fps, pre_filters=info.pre_filters(), post_filters=post, cwd=cwd,
+                         color_in=info.color_in())
     last = None
     try:
         for k in range(n):
@@ -113,7 +115,8 @@ def _segment_frames(seg: dict, idx: int, st: RenderSettings, face_det: FaceDetec
 
 def render(timeline: dict, plan: dict, music: dict | None, out_path: str, work_dir: str,
            settings: RenderSettings, face_det: FaceDetector | None = None, smart_reframe: bool = True,
-           progress=None, log=print, metadata: dict | None = None, auto_color: bool = True) -> dict:
+           progress=None, log=print, metadata: dict | None = None, auto_color: bool = True,
+           grade_strength: float = 1.0) -> dict:
     W, H, fps = settings.width, settings.height, settings.fps
     segs = timeline["segments"]
     N = timeline["total_frames"]
@@ -124,13 +127,20 @@ def render(timeline: dict, plan: dict, music: dict | None, out_path: str, work_d
                            bloom=plan.get("bloom", tex["bloom"]))
     # color: shot matching (per-shot balance) + the look, baked into one 3D LUT per distinct shot balance
     lut_dir = os.path.join(work_dir, "luts")
+    raw_color = plan.get("grading") is False  # "don't touch the colours": no LUT, no matching - source pixels
     corrections = match_shots({s.get("shot_id") or f"seg{i}": s.get("color") for i, s in enumerate(segs)}) \
-        if auto_color else {}
+        if (auto_color and not raw_color) else {}
     luts = []
     for i, s in enumerate(segs):
         corr = corrections.get(s.get("shot_id") or f"seg{i}")
         s["color_correction"] = corr
-        luts.append((cube_file(look, plan.get("look_intensity", 0.9), corr, Path(lut_dir)), lut_dir))
+        if raw_color:
+            luts.append(None)
+            continue
+        strength = float(plan.get("look_intensity", 0.9)) * float(grade_strength)
+        luts.append((cube_file(look, strength, corr, Path(lut_dir)), lut_dir))
+    if raw_color:
+        log("Colour: untouched (grading off) - original pixels, no LUT, no shot matching")
     fx = TransitionFX(W, H)
     texts = [TextOverlay(t["content"], t.get("style", "bold"), t.get("position", "center"), t["start"], t["end"],
                          W, H, finish.safe_top + int(H * 0.04), finish.safe_bottom - int(H * 0.04))
@@ -153,12 +163,31 @@ def render(timeline: dict, plan: dict, music: dict | None, out_path: str, work_d
     t0 = time.time()
     out_k = 0
 
+    # clip effects: which segment owns each output frame, and where the beats are (music, else every 0.5 s)
+    clipfx = ClipFX(W, H)
+    owner_starts = [s_["start_frame"] + s_["m_in"] / 2 for s_ in segs]
+    total_s = N / fps
+    if music and music.get("beats"):
+        beats = [b_ - float(plan.get("music_start", 0)) for b_ in music["beats"]]
+        beats = [b_ for b_ in beats if 0 <= b_ <= total_s]
+    else:
+        beats = list(np.arange(0, total_s, 0.5))
+    beats = np.array(beats or [0.0])
+    any_fx = any((s_.get("effect") or "none") != "none" for s_ in segs)
+
     def emit(frame):
         nonlocal out_k
         fr = finish.apply(frame, out_k)
         if fr is frame:
             fr = frame.copy()
         t = out_k / fps
+        if any_fx:
+            si = max(0, int(np.searchsorted(owner_starts, out_k, side="right")) - 1)
+            eff = segs[si].get("effect") or "none"
+            if eff != "none":
+                bi = int(np.searchsorted(beats, t, side="right")) - 1
+                since = t - beats[bi] if bi >= 0 else 99.0
+                fr = clipfx.apply(eff, fr, t - segs[si]["start_frame"] / fps, since, max(bi, 0))
         for ov in texts:
             ov.draw(fr, t)
         if captions:
